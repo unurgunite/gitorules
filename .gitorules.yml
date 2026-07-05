@@ -1,0 +1,34 @@
+# gitorules configuration
+# Manage GitHub branch rulesets declaratively across repositories.
+#
+# Usage:
+#   gitorules status          # Show current ruleset state
+#   gitorules apply           # Apply configuration
+#   gitorules apply --dry-run # Preview changes without applying
+
+# GitHub organization (used for auto-discovery when repos list is omitted)
+org: unurgunite
+
+# Explicit repository list (alternative to org auto-discovery)
+# When org is set, you can list specific repos or omit to discover all.
+repos:
+  - docscribe
+  - irb-autosuggestions
+  - gitorules
+
+# Branch ruleset definitions
+rules:
+  # Default branch (master/main) rules
+  default_branch:
+    # Allow only merge commits (no squash, no rebase)
+    merge: only
+    # Require status checks to pass before merge
+    checks:
+      - "check / check"
+
+  # Release branch rules
+  release:
+    # Branch name pattern (glob)
+    pattern: v*
+    # Allow only squash merges
+    squash: only
