@@ -1,4 +1,5 @@
 require "./types"
+require "./github"
 
 module Gitorules
   VERSION = "0.1.0"
