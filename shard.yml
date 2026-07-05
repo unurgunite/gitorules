@@ -13,4 +13,7 @@ description: Declarative GitHub Ruleset Manager
 development_dependencies:
   webmock:
     github: manastech/webmock.cr
-    version: "~> 0.14.0"
+    branch: master
+  ameba:
+    github: crystal-ameba/ameba
+    version: ">= 1.0.0"

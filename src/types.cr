@@ -105,7 +105,7 @@ struct Options
   # Target specific repository (full name).
   property repo : String? = nil
   # Preview changes without applying.
-  property dry_run : Bool = false
+  property? dry_run : Bool = false
   # GitHub personal access token.
   property token : String? = nil
 
