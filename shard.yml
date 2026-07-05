@@ -7,3 +7,10 @@ authors:
 crystal: ">= 1.12.0"
 
 license: MIT
+
+description: Declarative GitHub Ruleset Manager
+
+development_dependencies:
+  webmock:
+    github: manastech/webmock.cr
+    version: "~> 0.14.0"
