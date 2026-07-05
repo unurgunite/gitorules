@@ -55,5 +55,64 @@ module Gitorules
         io.to_s.should contain("Not found")
       end
     end
+
+    describe "#apply" do
+      before_each do
+        WebMock.reset
+      end
+
+      it "creates both master and release rulesets" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        WebMock.stub(:post, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %({"id": 1, "name": "test", "enforcement": "active", "target": "branch", "rules": []}))
+
+        io = IO::Memory.new
+        engine.apply([repo], dry_run: false, io: io)
+        io.to_s.should contain("Created ruleset 'Master - merge commits only'")
+        io.to_s.should contain("Created ruleset 'Release branches - squash only'")
+      end
+
+      it "updates existing rulesets" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 1, "name": "Master - merge commits only", "enforcement": "active", "target": "branch", "rules": []}, {"id": 2, "name": "Release branches - squash only", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:put, "https://api.github.com/repos/unurgunite/docscribe/rulesets/1")
+          .to_return(body: %({"id": 1, "name": "test", "enforcement": "active", "target": "branch", "rules": []}))
+        WebMock.stub(:put, "https://api.github.com/repos/unurgunite/docscribe/rulesets/2")
+          .to_return(body: %({"id": 2, "name": "test", "enforcement": "active", "target": "branch", "rules": []}))
+
+        io = IO::Memory.new
+        engine.apply([repo], io: io)
+        io.to_s.should contain("Updated ruleset 'Master - merge commits only'")
+        io.to_s.should contain("Updated ruleset 'Release branches - squash only'")
+      end
+
+      it "dry-run prints intentions without modification" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        io = IO::Memory.new
+        engine.apply([repo], dry_run: true, io: io)
+        io.to_s.should contain("Would create ruleset 'Master - merge commits only'")
+        io.to_s.should contain("Would create ruleset 'Release branches - squash only'")
+      end
+
+      it "uses pattern from config for release branch conditions" do
+        custom_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n  release:\n    pattern: release/*\n    squash: only\n")
+        custom_engine = Engine.new(client, custom_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        WebMock.stub(:post, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %({"id": 1, "name": "test", "enforcement": "active", "target": "branch", "rules": []}))
+
+        io = IO::Memory.new
+        custom_engine.apply([repo], io: io)
+        io.to_s.should contain("Created ruleset 'Release branches - squash only'")
+      end
+    end
   end
 end

@@ -74,5 +74,112 @@ module Gitorules
         io.puts "%-40s %s" % [repo, "#{master_s}  #{release_s}  #{check_s}"]
       end
     end
+
+    # Applies desired ruleset configuration to repositories.
+    #
+    # Creates or updates master and release rulesets based on config.
+    # In dry-run mode prints intended actions without API calls.
+    #
+    # @param repos [Array(String)] Full repository names
+    # @param dry_run [Bool] Preview only (default: false)
+    def apply(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT)
+      repos.each do |repo|
+        apply_repo(repo, dry_run, io)
+      end
+    end
+
+    private def apply_repo(repo : String, dry_run : Bool, io : IO)
+      existing = @client.list_rulesets(repo)
+
+      if master_config = @config.rules.try(&.["default_branch"]?)
+        wanted = build_master_ruleset(master_config)
+        found = existing.find(&.name.in?(MASTER_NAMES))
+        apply_ruleset(repo, found, wanted, dry_run, io)
+      end
+
+      if release_config = @config.rules.try(&.["release"]?)
+        wanted = build_release_ruleset(release_config)
+        found = existing.find { |rs| rs.name == RELEASE_NAME }
+        apply_ruleset(repo, found, wanted, dry_run, io)
+      end
+    end
+
+    private def build_master_ruleset(config : BranchRuleConfig) : Ruleset
+      refs = ["refs/heads/master"]
+      build_ruleset(MASTER_NAMES.first, config, refs)
+    end
+
+    private def build_release_ruleset(config : BranchRuleConfig) : Ruleset
+      pattern = config.pattern || "v*"
+      refs = ["refs/heads/#{pattern}"]
+      build_ruleset(RELEASE_NAME, config, refs)
+    end
+
+    private def build_ruleset(name : String, config : BranchRuleConfig, ref_include : Array(String)) : Ruleset
+      rules = [] of Rule
+      rules << Rule.new("deletion")
+      rules << Rule.new("non_fast_forward")
+      rules << Rule.new("pull_request", merge_method_params(config.merge_method))
+
+      if checks = config.checks
+        rules << Rule.new("required_status_checks", required_status_checks_params(checks))
+      end
+
+      Ruleset.new(
+        name: name,
+        enforcement: "active",
+        target: "branch",
+        conditions: {
+          "ref_name" => JSON::Any.new({
+            "include" => JSON::Any.new(ref_include.map { |r| JSON::Any.new(r) }),
+            "exclude" => JSON::Any.new([] of JSON::Any),
+          }),
+        },
+        rules: rules,
+      )
+    end
+
+    private def merge_method_params(method : String?) : Hash(String, JSON::Any)
+      params = {
+        "required_approving_review_count"   => JSON::Any.new(0_i64),
+        "dismiss_stale_reviews_on_push"     => JSON::Any.new(false),
+        "require_code_owner_review"         => JSON::Any.new(false),
+        "require_last_push_approval"        => JSON::Any.new(false),
+        "required_review_thread_resolution" => JSON::Any.new(false),
+        "required_reviewers"                => JSON::Any.new([] of JSON::Any),
+      }
+
+      if method
+        params["allowed_merge_methods"] = JSON::Any.new([JSON::Any.new(method)])
+      end
+
+      params
+    end
+
+    private def required_status_checks_params(checks : Array(String)) : Hash(String, JSON::Any)
+      {
+        "required_status_checks"               => JSON::Any.new(checks.map { |c| JSON::Any.new({"context" => JSON::Any.new(c)}) }),
+        "strict_required_status_checks_policy" => JSON::Any.new(true),
+      }
+    end
+
+    private def apply_ruleset(repo : String, existing : Ruleset?, wanted : Ruleset, dry_run : Bool, io : IO)
+      if dry_run
+        if existing && existing.id
+          io.puts "#{repo}: Would update ruleset '#{wanted.name}' (ID #{existing.id})"
+        else
+          io.puts "#{repo}: Would create ruleset '#{wanted.name}'"
+        end
+        return
+      end
+
+      if existing && (id = existing.id)
+        @client.update_ruleset(repo, id, wanted)
+        io.puts "#{repo}: Updated ruleset '#{wanted.name}'"
+      else
+        @client.create_ruleset(repo, wanted)
+        io.puts "#{repo}: Created ruleset '#{wanted.name}'"
+      end
+    end
   end
 end

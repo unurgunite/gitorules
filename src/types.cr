@@ -67,6 +67,8 @@ struct BranchRuleConfig
   property squash : String?
   # Allow only rebase merges. Value: "only".
   property rebase : String?
+  # Branch name pattern for release branches (e.g. "v*").
+  property pattern : String?
   # Required status check contexts (e.g. "check / check").
   property checks : Array(String)?
   # Require linear history (no merge commits).
