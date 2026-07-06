@@ -27,8 +27,7 @@ module Gitorules
 
         io = IO::Memory.new
         engine.status([repo], io)
-        io.to_s.should contain("✓ merge")
-        io.to_s.should contain("✓ active")
+        io.to_s.should contain("✓ merge +checks")
       end
 
       it "warns for missing checks" do
@@ -43,7 +42,7 @@ module Gitorules
 
         io = IO::Memory.new
         engine.status([repo], io)
-        io.to_s.should contain("✗ missing")
+        io.to_s.should contain("✓ merge -checks")
       end
 
       it "handles API errors gracefully" do
@@ -70,8 +69,8 @@ module Gitorules
 
         io = IO::Memory.new
         engine.apply([repo], dry_run: false, io: io)
-        io.to_s.should contain("Created ruleset 'Master - merge commits only'")
-        io.to_s.should contain("Created ruleset 'Release branches - squash only'")
+        io.to_s.should contain("Created ruleset 'master'")
+        io.to_s.should contain("Created ruleset 'Release branches — squash only'")
       end
 
       it "updates existing rulesets" do
@@ -85,8 +84,8 @@ module Gitorules
 
         io = IO::Memory.new
         engine.apply([repo], io: io)
-        io.to_s.should contain("Updated ruleset 'Master - merge commits only'")
-        io.to_s.should contain("Updated ruleset 'Release branches - squash only'")
+        io.to_s.should contain("Updated ruleset 'master'")
+        io.to_s.should contain("Updated ruleset 'Release branches — squash only'")
       end
 
       it "dry-run prints intentions without modification" do
@@ -95,8 +94,8 @@ module Gitorules
 
         io = IO::Memory.new
         engine.apply([repo], dry_run: true, io: io)
-        io.to_s.should contain("Would create ruleset 'Master - merge commits only'")
-        io.to_s.should contain("Would create ruleset 'Release branches - squash only'")
+        io.to_s.should contain("Would create ruleset 'master'")
+        io.to_s.should contain("Would create ruleset 'Release branches — squash only'")
       end
 
       it "uses pattern from config for release branch conditions" do
@@ -111,7 +110,7 @@ module Gitorules
 
         io = IO::Memory.new
         custom_engine.apply([repo], io: io)
-        io.to_s.should contain("Created ruleset 'Release branches - squash only'")
+        io.to_s.should contain("Created ruleset 'Release branches — squash only'")
       end
     end
   end
