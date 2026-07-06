@@ -115,6 +115,82 @@ module Gitorules
       actual == expected ? " +checks".colorize.green.to_s : " ~checks".colorize.yellow.to_s
     end
 
+    # Outputs status as JSON array.
+    #
+    # @param repos [Array(String)] Full repository names
+    # @param io [IO] Output stream (default: STDOUT)
+    def status_json(repos : Array(String), io : IO = STDOUT)
+      types = @config.rules.try(&.keys) || [] of String
+      io.puts(JSON.build do |json|
+        json.array do
+          repos.each do |repo|
+            json.object do
+              json.field "repo", repo
+              status_json_repo(json, repo, types)
+            end
+          end
+        end
+      end)
+    end
+
+    private def status_json_repo(json : JSON::Builder, repo : String, types : Array(String))
+      rulesets = @client.list_rulesets(repo)
+      json.field "types" do
+        json.object do
+          types.each do |type|
+            rule_config = @config.rules.try { |r| r[type] }
+            names = type_match_names(type, rule_config)
+            rs = rulesets.find(&.name.in?(names))
+            json.field type do
+              status_json_type(json, repo, rs, rule_config)
+            end
+          end
+        end
+      end
+    rescue ex
+      json.field "error", ex.message
+    end
+
+    private def status_json_type(json : JSON::Builder, repo : String, rs : Ruleset?, rule_config : BranchRuleConfig?)
+      id = rs.try(&.id)
+      unless id
+        json.object { json.field "exists", false }
+        return
+      end
+
+      begin
+        full = @client.get_ruleset(repo, id)
+      rescue
+        json.object { json.field "exists", false }
+        return
+      end
+
+      pr_rule = full.rules.find { |r| r.type == "pull_request" }
+      params = pr_rule.try(&.parameters)
+      methods = params.try { |p| p["allowed_merge_methods"]?.try(&.as_a) }
+
+      json.object do
+        json.field "exists", true
+        json.field "name", full.name
+
+        if methods
+          method = methods.first?.to_s
+          expected = rule_config.try(&.merge_method)
+          method_ok = expected == method || !expected
+          json.field "merge_method", method
+          json.field "merge_method_ok", method_ok
+        end
+
+        expected_checks = rule_config.try(&.checks)
+        if expected_checks
+          checks_rule = full.rules.find { |r| r.type == "required_status_checks" }
+          params = checks_rule.try(&.parameters)
+          actual = params.try { |p| p["required_status_checks"]?.try(&.as_a).try { |a| a.map { |c| c.as_h["context"]?.try(&.to_s) } } }
+          json.field "checks_ok", actual == expected_checks
+        end
+      end
+    end
+
     # Shows difference between current and desired configuration.
     #
     # For each repository: loads current rulesets, compares with desired
@@ -125,6 +201,130 @@ module Gitorules
     def diff(repos : Array(String), io : IO = STDOUT)
       repos.each do |repo|
         diff_repo(repo, io)
+      end
+    end
+
+    # Outputs diff as JSON array.
+    #
+    # @param repos [Array(String)] Full repository names
+    # @param io [IO] Output stream (default: STDOUT)
+    def diff_json(repos : Array(String), io : IO = STDOUT)
+      io.puts(JSON.build do |json|
+        json.array do
+          repos.each do |repo|
+            diff_json_repo(json, repo)
+          end
+        end
+      end)
+    end
+
+    private def diff_json_repo(json : JSON::Builder, repo : String)
+      begin
+        existing = @client.list_rulesets(repo)
+      rescue ex
+        json.object do
+          json.field "repo", repo
+          json.field "error", ex.message
+        end
+        return
+      end
+
+      json.object do
+        json.field "repo", repo
+        json.field "changes" do
+          json.array do
+            matched = Set(String).new
+
+            if rules = @config.rules
+              rules.each do |type, config|
+                wanted = build_type_ruleset(type, config)
+                names = type_match_names(type, config)
+                found = existing.find(&.name.in?(names))
+                matched << found.name if found
+
+                if found
+                  diff_json_update(json, repo, found, wanted)
+                else
+                  diff_json_create(json, wanted)
+                end
+              end
+            end
+
+            existing.each do |rs|
+              next if rs.name.in?(matched)
+              diff_json_orphan(json, rs.name)
+            end
+          end
+        end
+      end
+    end
+
+    private def diff_json_create(json : JSON::Builder, wanted : Ruleset)
+      json.object do
+        json.field "action", "create"
+        json.field "name", wanted.name
+        json.field "rules", wanted.rules.map(&.type)
+        if conditions = wanted.conditions
+          if ref = conditions["ref_name"]?
+            if inc = ref.as_h["include"]?.try(&.as_a)
+              json.field "branches", inc.map(&.to_s)
+            end
+          end
+        end
+      end
+    end
+
+    private def diff_json_update(json : JSON::Builder, repo : String, existing_rs : Ruleset, wanted : Ruleset)
+      id = existing_rs.id
+      unless id
+        diff_json_create(json, wanted)
+        return
+      end
+
+      full = begin
+        @client.get_ruleset(repo, id)
+      rescue
+        diff_json_create(json, wanted)
+        return
+      end
+
+      changes = [] of String
+
+      existing_rules = Set.new(full.rules.map(&.type))
+      wanted_rules = Set.new(wanted.rules.map(&.type))
+
+      (wanted_rules - existing_rules).each { |r| changes << "+#{r}" }
+      (existing_rules - wanted_rules).each { |r| changes << "-#{r}" }
+
+      wanted.rules.each do |wanted_rule|
+        existing_rule = full.rules.find { |r| r.type == wanted_rule.type }
+        next unless existing_rule
+
+        wanted_params = wanted_rule.parameters
+        existing_params = existing_rule.parameters
+        next unless wanted_params && existing_params
+
+        wanted_params.each do |key, wanted_val|
+          existing_val = existing_params[key]?
+          if existing_val != wanted_val
+            changes << "#{key}: #{existing_val} → #{wanted_val}"
+          end
+        end
+      end
+
+      json.object do
+        json.field "action", changes.empty? ? "unchanged" : "update"
+        json.field "name", wanted.name
+        unless changes.empty?
+          json.field "changes", changes
+        end
+      end
+    end
+
+    private def diff_json_orphan(json : JSON::Builder, name : String)
+      json.object do
+        json.field "action", "orphan"
+        json.field "name", name
       end
     end
 
@@ -301,6 +501,68 @@ module Gitorules
     def apply(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT)
       repos.each do |repo|
         apply_repo(repo, dry_run, io)
+      end
+    end
+
+    # Outputs apply result as JSON array.
+    #
+    # @param repos [Array(String)] Full repository names
+    # @param dry_run [Bool] Preview only (default: false)
+    # @param io [IO] Output stream (default: STDOUT)
+    def apply_json(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT)
+      io.puts(JSON.build do |json|
+        json.array do
+          repos.each do |repo|
+            apply_json_repo(json, repo, dry_run)
+          end
+        end
+      end)
+    end
+
+    private def apply_json_repo(json : JSON::Builder, repo : String, dry_run : Bool)
+      begin
+        existing = @client.list_rulesets(repo)
+      rescue ex
+        json.object do
+          json.field "repo", repo
+          json.field "error", ex.message
+        end
+        return
+      end
+
+      json.object do
+        json.field "repo", repo
+        json.field "results" do
+          json.array do
+            if rules = @config.rules
+              rules.each do |type, config|
+                wanted = build_type_ruleset(type, config)
+                names = type_match_names(type, config)
+                found = existing.find(&.name.in?(names))
+                apply_json_ruleset(json, repo, found, wanted, dry_run)
+              end
+            end
+          end
+        end
+      end
+    end
+
+    private def apply_json_ruleset(json : JSON::Builder, repo : String, existing : Ruleset?, wanted : Ruleset, dry_run : Bool)
+      if dry_run || (!existing || !existing.id)
+        action = (!existing || !existing.id) ? "create" : "update"
+        json.object do
+          json.field "action", action
+          json.field "name", wanted.name
+          json.field "dry_run", true if dry_run
+          json.field "id", existing.id if existing && existing.id
+        end
+        return
+      end
+
+      json.object do
+        json.field "action", "update"
+        json.field "name", wanted.name
+        json.field "id", existing.id
       end
     end
 
