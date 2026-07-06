@@ -41,7 +41,7 @@ module Gitorules
       config_path = ".gitorules.yml"
 
       OptionParser.parse(args) do |parser|
-        parser.banner = "Usage: gitorules <status|apply|diff> [options]\n\nCommands:\n"
+        parser.banner = "Usage: gitorules <status|apply|diff|init> [options]\n\nCommands:\n"
 
         parser.on("status", "Show ruleset status for repositories") do
           options.mode = "status"
@@ -53,6 +53,10 @@ module Gitorules
 
         parser.on("diff", "Show pending changes without applying") do
           options.mode = "diff"
+        end
+
+        parser.on("init", "Generate .gitorules.yml from existing rulesets") do
+          options.mode = "init"
         end
 
         parser.separator "\nOptions:\n"
@@ -67,6 +71,10 @@ module Gitorules
 
         parser.on("--repo REPO", "Target a single repository (owner/name)") do |v|
           options.repo = v
+        end
+
+        parser.on("--org ORG", "GitHub organization name (for init)") do |v|
+          options.org = v
         end
 
         parser.on("--token TOKEN", "GitHub personal access token") do |v|
@@ -94,6 +102,13 @@ module Gitorules
         raise ExitSignal.new(1)
       end
 
+      client = GitHubClient.new(token)
+
+      # Handle init separately — no config needed
+      if options.mode == "init"
+        return handle_init(options, client)
+      end
+
       begin
         loader = ConfigLoader.new(config_path, token)
       rescue ex
@@ -101,7 +116,6 @@ module Gitorules
         raise ExitSignal.new(1)
       end
 
-      client = GitHubClient.new(token)
       engine = Engine.new(client, loader.config)
 
       repos = if repo = options.repo
@@ -126,6 +140,31 @@ module Gitorules
         raise ExitSignal.new(1)
       end
 
+      0
+    end
+
+    private def self.handle_init(options : Options, client : GitHubClient) : Int32
+      repos = if repo = options.repo
+                [repo]
+              elsif org = options.org
+                begin
+                  client.list_repos(org).map { |name| "#{org}/#{name}" }
+                rescue ex
+                  STDERR.puts "Error listing repositories for org '#{org}': #{ex.message}"
+                  raise ExitSignal.new(1)
+                end
+              else
+                STDERR.puts "Error: --repo or --org required for init"
+                raise ExitSignal.new(1)
+              end
+
+      if repos.empty?
+        STDERR.puts "Error: no repositories found"
+        raise ExitSignal.new(1)
+      end
+
+      generator = ConfigGenerator.new(client)
+      generator.generate(repos)
       0
     end
   end

@@ -53,6 +53,65 @@ module Gitorules
         engine.status(["unurgunite/unknown"], io)
         io.to_s.should contain("Not found")
       end
+
+      it "shows ~checks for wrong context" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 4, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/4")
+          .to_return(body: %({"id": 4, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "check"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        io = IO::Memory.new
+        engine.status([repo], io)
+        io.to_s.should contain("✓ merge ~checks")
+      end
+
+      it "shows ✗ method mismatch" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 5, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/5")
+          .to_return(body: %({"id": 5, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["squash"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}}
+          ]}))
+
+        io = IO::Memory.new
+        engine.status([repo], io)
+        io.to_s.should contain("✗ squash")
+      end
+
+      it "shows MISSING when no matching ruleset found" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 6, "name": "unrelated", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        io = IO::Memory.new
+        engine.status([repo], io)
+        io.to_s.should contain("✗ MISSING")
+      end
+
+      it "shows +checks with no checks configured in type" do
+        no_checks_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n")
+        no_checks_engine = Engine.new(client, no_checks_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 7, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/7")
+          .to_return(body: %({"id": 7, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}}
+          ]}))
+
+        io = IO::Memory.new
+        no_checks_engine.status([repo], io)
+        io.to_s.should contain("✓ merge")
+        io.to_s.should_not contain("checks")
+      end
     end
 
     describe "#diff" do
@@ -115,6 +174,25 @@ module Gitorules
         engine.diff(["unurgunite/unknown"], io)
         io.to_s.should contain("Error: Not found")
       end
+
+      it "shows orphan rulesets" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 10, "name": "master", "enforcement": "active", "target": "branch", "rules": []}, {"id": 11, "name": "Deprecated", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/10")
+          .to_return(body: %({"id": 10, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "check / check"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        io = IO::Memory.new
+        engine.diff([repo], io)
+        io.to_s.should contain("no changes")
+        io.to_s.should contain("Orphan")
+        io.to_s.should contain("Deprecated")
+      end
     end
 
     describe "#apply" do
@@ -158,6 +236,18 @@ module Gitorules
         engine.apply([repo], dry_run: true, io: io)
         io.to_s.should contain("Would create ruleset 'master'")
         io.to_s.should contain("Would create ruleset 'Release branches — squash only'")
+      end
+
+      it "does nothing when no rules in config" do
+        empty_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\n")
+        empty_engine = Engine.new(client, empty_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        io = IO::Memory.new
+        empty_engine.apply([repo], io: io)
+        io.to_s.should be_empty
       end
 
       it "uses pattern from config for release branch conditions" do

@@ -61,6 +61,9 @@ end
 struct BranchRuleConfig
   include YAML::Serializable
 
+  def initialize
+  end
+
   # Allow only merge commits. Value: "only".
   property merge : String?
   # Allow only squash merges. Value: "only".
@@ -94,6 +97,9 @@ end
 struct Config
   include YAML::Serializable
 
+  def initialize
+  end
+
   # GitHub organization name. When set, repos can be auto-discovered.
   property org : String?
   # Explicit list of repository names (with or without org prefix).
@@ -114,6 +120,8 @@ struct Options
   property? diff : Bool = false
   # GitHub personal access token.
   property token : String? = nil
+  # GitHub organization name.
+  property org : String? = nil
 
   def initialize
   end
