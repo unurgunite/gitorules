@@ -8,6 +8,7 @@ on:
 
 jobs:
   check-source:
+    if: github.base_ref == 'master'
     uses: FlorexLabs/shared-workflows/.github/workflows/check-source-branch.yml@master
 
   build:
