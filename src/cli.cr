@@ -41,7 +41,7 @@ module Gitorules
       config_path = ".gitorules.yml"
 
       OptionParser.parse(args) do |parser|
-        parser.banner = "Usage: gitorules <status|apply> [options]\n\nCommands:\n"
+        parser.banner = "Usage: gitorules <status|apply|diff> [options]\n\nCommands:\n"
 
         parser.on("status", "Show ruleset status for repositories") do
           options.mode = "status"
@@ -51,10 +51,18 @@ module Gitorules
           options.mode = "apply"
         end
 
+        parser.on("diff", "Show pending changes without applying") do
+          options.mode = "diff"
+        end
+
         parser.separator "\nOptions:\n"
 
         parser.on("--dry-run", "Preview apply changes without making them") do
           options.dry_run = true
+        end
+
+        parser.on("--diff", "Show pending changes (same as diff command)") do
+          options.diff = true
         end
 
         parser.on("--repo REPO", "Target a single repository (owner/name)") do |v|
@@ -106,7 +114,13 @@ module Gitorules
       when "status"
         engine.status(repos)
       when "apply"
-        engine.apply(repos, dry_run: options.dry_run?)
+        if options.diff?
+          engine.diff(repos)
+        else
+          engine.apply(repos, dry_run: options.dry_run?)
+        end
+      when "diff"
+        engine.diff(repos)
       else
         STDERR.puts "gitorules: unknown subcommand '#{options.mode}'"
         raise ExitSignal.new(1)
