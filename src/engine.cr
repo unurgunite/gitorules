@@ -23,58 +23,96 @@ module Gitorules
     # @param io [IO] Output stream (default: STDOUT)
     def status(repos : Array(String), io : IO = STDOUT)
       types = @config.rules.try(&.keys) || [] of String
+      status_print_header(types, io)
+      repos.each { |repo| status_repo_line(repo, types, io) }
+    end
 
+    # Prints the status table header row and separator.
+    #
+    # @param types [Array(String)] Configured branch type keys
+    # @param io [IO] Output stream
+    private def status_print_header(types : Array(String), io : IO)
       header = "%-40s " % ["Repository"]
       types.each { |t| header += "%-24s " % [type_label(t)] }
       io.puts header
       io.puts "─" * (42 + types.size * 25)
+    end
 
-      repos.each do |repo|
-        results = {} of String => String
+    # Prints one row of the status table for a single repository.
+    #
+    # Fetches rulesets and computes status for each branch type.
+    # On API error prints the error message and returns early.
+    #
+    # @param repo [String] Full repository name (owner/name)
+    # @param types [Array(String)] Configured branch type keys
+    # @param io [IO] Output stream
+    private def status_repo_line(repo : String, types : Array(String), io : IO)
+      results = {} of String => String
 
-        begin
-          rulesets = @client.list_rulesets(repo)
-
-          types.each do |type|
-            rule_config = @config.rules.try { |r| r[type] }
-            names = type_match_names(type, rule_config)
-            if rs = rulesets.find(&.name.in?(names))
-              if rs_id = rs.id
-                full = @client.get_ruleset(repo, rs_id)
-                if pr_rule = full.rules.find { |r| r.type == "pull_request" }
-                  if params = pr_rule.parameters
-                    if methods = params["allowed_merge_methods"]?.try(&.as_a)
-                      method = methods.first?.to_s
-                      method_ok = rule_config.try(&.merge_method) == method || !rule_config.try(&.merge_method)
-                      checks_ok = if rule_config.try(&.checks)
-                                    full.rules.any? { |r| r.type == "required_status_checks" }
-                                  else
-                                    true
-                                  end
-                      method_status = method_ok ? "✓ #{method}" : "✗ #{method}"
-                      status = method_ok ? method_status.colorize.green : method_status.colorize.red
-                      if rule_config.try(&.checks)
-                        check_status = checks_ok ? " +checks".colorize.green : " -checks".colorize.yellow
-                        status = status.to_s + check_status.to_s
-                      end
-                      results[type] = status.to_s
-                    end
-                  end
-                end
-              end
-            else
-              results[type] = "✗ MISSING".colorize.red.to_s
-            end
-          end
-        rescue ex
-          io.puts "%s  Error: %s" % [repo, ex.message]
-          next
-        end
-
-        line = "%-40s " % [repo]
-        types.each { |t| line += "%-24s " % [results.fetch(t, "✗ MISSING".colorize.red.to_s)] }
-        io.puts line
+      begin
+        rulesets = @client.list_rulesets(repo)
+        types.each { |type| results[type] = status_type_result(repo, rulesets, type) }
+      rescue ex
+        io.puts "%s  Error: %s" % [repo, ex.message]
+        return
       end
+
+      line = "%-40s " % [repo]
+      types.each { |t| line += "%-24s " % [results.fetch(t, "✗ MISSING".colorize.red.to_s)] }
+      io.puts line
+    end
+
+    # Computes the status string for a single branch type in a repo.
+    #
+    # Returns a colorized string showing merge method (✓/✗) and
+    # checks status (+checks/~checks/-checks/MISSING).
+    #
+    # @param repo [String] Full repository name
+    # @param rulesets [Array(Ruleset)] Existing rulesets for the repo
+    # @param type [String] Branch type key
+    # @return [String] Colorized status string
+    private def status_type_result(repo : String, rulesets : Array(Ruleset), type : String) : String
+      rule_config = @config.rules.try { |r| r[type] }
+      names = type_match_names(type, rule_config)
+      rs = rulesets.find(&.name.in?(names))
+      id = rs.try(&.id)
+      return "✗ MISSING".colorize.red.to_s unless id
+
+      full = @client.get_ruleset(repo, id)
+      pr_rule = full.rules.find { |r| r.type == "pull_request" }
+      params = pr_rule.try(&.parameters)
+      return "✗ MISSING".colorize.red.to_s unless params
+
+      methods = params["allowed_merge_methods"]?.try(&.as_a)
+      return "✗ MISSING".colorize.red.to_s unless methods
+
+      method = methods.first?.to_s
+      method_ok = rule_config.try(&.merge_method) == method || !rule_config.try(&.merge_method)
+      status = method_ok ? "✓ #{method}".colorize.green : "✗ #{method}".colorize.red
+      status = status.to_s + checks_status_label(full, rule_config.try(&.checks))
+      status.to_s
+    end
+
+    # Returns a colorized checks status suffix for the status output.
+    #
+    # Compares actual check contexts with expected values from config.
+    # Returns "+checks" (green), "~checks" (yellow), "-checks" (yellow),
+    # or empty string if checks are not configured.
+    #
+    # @param full [Ruleset] Full ruleset with rule details
+    # @param expected [Array(String)?] Expected check contexts from config
+    # @return [String] Colorized checks status suffix
+    private def checks_status_label(full : Ruleset, expected : Array(String)?) : String
+      return "" unless expected
+
+      checks_rule = full.rules.find { |r| r.type == "required_status_checks" }
+      params = checks_rule.try(&.parameters)
+      return " -checks".colorize.yellow.to_s unless params
+
+      actual = params["required_status_checks"]?.try(&.as_a).try { |a| a.map { |c| c.as_h["context"]?.try(&.to_s) } }
+      return " -checks".colorize.yellow.to_s unless actual
+
+      actual == expected ? " +checks".colorize.green.to_s : " ~checks".colorize.yellow.to_s
     end
 
     # Shows difference between current and desired configuration.
@@ -90,6 +128,13 @@ module Gitorules
       end
     end
 
+    # Prints diff output for a single repository.
+    #
+    # Compares desired rulesets from config against existing ones.
+    # Shows create/update/orphan for each ruleset.
+    #
+    # @param repo [String] Full repository name (owner/name)
+    # @param io [IO] Output stream
     private def diff_repo(repo : String, io : IO)
       begin
         existing = @client.list_rulesets(repo)
@@ -125,6 +170,12 @@ module Gitorules
       io.puts ""
     end
 
+    # Prints a diff entry for a ruleset that should be created.
+    #
+    # Shows the ruleset name, rules, and target branches.
+    #
+    # @param wanted [Ruleset] Desired ruleset configuration
+    # @param io [IO] Output stream
     private def diff_ruleset_create(wanted : Ruleset, io : IO)
       io.puts "  #{diff_add("Create ruleset '#{wanted.name}'")}"
       rules = wanted.rules.map(&.type).join(", ")
@@ -139,6 +190,15 @@ module Gitorules
       end
     end
 
+    # Prints a diff entry for a ruleset that needs updating.
+    #
+    # Fetches the full ruleset, compares with desired state, and
+    # lists each difference (added rules, removed rules, param changes).
+    #
+    # @param repo [String] Full repository name
+    # @param existing_rs [Ruleset] Existing ruleset (from list endpoint)
+    # @param wanted [Ruleset] Desired ruleset configuration
+    # @param io [IO] Output stream
     private def diff_ruleset_update(repo : String, existing_rs : Ruleset, wanted : Ruleset, io : IO)
       id = existing_rs.id
       unless id
@@ -190,22 +250,42 @@ module Gitorules
       end
     end
 
+    # Formats text as a green addition for diff output.
+    #
+    # @param text [String] Description of the addition
+    # @return [String] Green colorized "+ text"
     private def diff_add(text : String) : String
       "+ #{text}".colorize.green.to_s
     end
 
+    # Formats text as a red removal for diff output.
+    #
+    # @param text [String] Description of the removal
+    # @return [String] Red colorized "- text"
     private def diff_remove(text : String) : String
       "- #{text}".colorize.red.to_s
     end
 
+    # Formats text as a yellow change for diff output.
+    #
+    # @param text [String] Description of the change
+    # @return [String] Yellow colorized "~ text"
     private def diff_change(text : String) : String
       "~ #{text}".colorize.yellow.to_s
     end
 
+    # Formats text as a dimmed unchanged entry for diff output.
+    #
+    # @param text [String] Description (e.g. "no changes")
+    # @return [String] Dimmed "  text"
     private def diff_unchanged(text : String) : String
       "  #{text}".colorize.dim.to_s
     end
 
+    # Formats an orphan ruleset entry for diff output.
+    #
+    # @param name [String] Ruleset name
+    # @return [String] Red colorized "- Orphan ruleset 'name'"
     private def diff_orphan(name : String) : String
       "- Orphan ruleset '#{name}'".colorize.red.to_s
     end
@@ -224,6 +304,14 @@ module Gitorules
       end
     end
 
+    # Applies desired rulesets for a single repository.
+    #
+    # Iterates over ALL configured branch types and creates or
+    # updates each matching ruleset via the GitHub API.
+    #
+    # @param repo [String] Full repository name (owner/name)
+    # @param dry_run [Bool] Preview only without API mutations
+    # @param io [IO] Output stream
     private def apply_repo(repo : String, dry_run : Bool, io : IO)
       existing = @client.list_rulesets(repo)
 
@@ -319,6 +407,15 @@ module Gitorules
       build_ruleset(name, config, refs)
     end
 
+    # Builds a complete Ruleset struct for API submission.
+    #
+    # Always includes deletion, non_fast_forward, and pull_request
+    # rules. Adds required_status_checks only when checks are configured.
+    #
+    # @param name [String] Ruleset display name
+    # @param config [BranchRuleConfig] Branch type configuration
+    # @param ref_include [Array(String)] Ref patterns to include
+    # @return [Ruleset] Ruleset ready for API submission
     private def build_ruleset(name : String, config : BranchRuleConfig, ref_include : Array(String)) : Ruleset
       rules = [] of Rule
       rules << Rule.new("deletion")
@@ -343,6 +440,13 @@ module Gitorules
       )
     end
 
+    # Builds parameters for the pull_request rule.
+    #
+    # Sets up required approving review count, stale review dismissal,
+    # code owner review, and optionally the allowed merge methods.
+    #
+    # @param method [String?] Allowed merge method (nil = no restriction)
+    # @return [Hash(String, JSON::Any)] Pull request rule parameters
     private def merge_method_params(method : String?) : Hash(String, JSON::Any)
       params = {
         "required_approving_review_count"   => JSON::Any.new(0_i64),
@@ -360,6 +464,13 @@ module Gitorules
       params
     end
 
+    # Builds parameters for the required_status_checks rule.
+    #
+    # Creates the required status check contexts list and enables
+    # strict policy (new commits require re-check).
+    #
+    # @param checks [Array(String)] Required check context names
+    # @return [Hash(String, JSON::Any)] Required status checks parameters
     private def required_status_checks_params(checks : Array(String)) : Hash(String, JSON::Any)
       {
         "required_status_checks"               => JSON::Any.new(checks.map { |c| JSON::Any.new({"context" => JSON::Any.new(c)}) }),
@@ -367,6 +478,16 @@ module Gitorules
       }
     end
 
+    # Creates or updates a single ruleset via the GitHub API.
+    #
+    # In dry-run mode prints intended action without API calls.
+    # If existing has an ID, calls update; otherwise calls create.
+    #
+    # @param repo [String] Full repository name
+    # @param existing [Ruleset?] Existing ruleset (nil if none)
+    # @param wanted [Ruleset] Desired ruleset configuration
+    # @param dry_run [Bool] Preview only without API mutations
+    # @param io [IO] Output stream
     private def apply_ruleset(repo : String, existing : Ruleset?, wanted : Ruleset, dry_run : Bool, io : IO)
       if dry_run
         if existing && existing.id
