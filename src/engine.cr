@@ -77,6 +77,139 @@ module Gitorules
       end
     end
 
+    # Shows difference between current and desired configuration.
+    #
+    # For each repository: loads current rulesets, compares with desired
+    # from config, and prints changes without applying them.
+    #
+    # @param repos [Array(String)] Full repository names
+    # @param io [IO] Output stream (default: STDOUT)
+    def diff(repos : Array(String), io : IO = STDOUT)
+      repos.each do |repo|
+        diff_repo(repo, io)
+      end
+    end
+
+    private def diff_repo(repo : String, io : IO)
+      begin
+        existing = @client.list_rulesets(repo)
+      rescue ex
+        io.puts "#{repo}: Error: #{ex.message}"
+        return
+      end
+
+      io.puts "=== #{repo} ==="
+
+      matched = Set(String).new
+
+      if rules = @config.rules
+        rules.each do |type, config|
+          wanted = build_type_ruleset(type, config)
+          names = type_match_names(type, config)
+          found = existing.find(&.name.in?(names))
+          matched << found.name if found
+
+          if found
+            diff_ruleset_update(repo, found, wanted, io)
+          else
+            diff_ruleset_create(wanted, io)
+          end
+        end
+      end
+
+      existing.each do |rs|
+        next if rs.name.in?(matched)
+        io.puts "  #{diff_orphan(rs.name)}"
+      end
+
+      io.puts ""
+    end
+
+    private def diff_ruleset_create(wanted : Ruleset, io : IO)
+      io.puts "  #{diff_add("Create ruleset '#{wanted.name}'")}"
+      rules = wanted.rules.map(&.type).join(", ")
+      io.puts "    rules: #{rules}"
+
+      if conditions = wanted.conditions
+        if ref = conditions["ref_name"]?
+          if inc = ref.as_h["include"]?.try(&.as_a)
+            io.puts "    branches: #{inc.map(&.to_s).join(", ")}"
+          end
+        end
+      end
+    end
+
+    private def diff_ruleset_update(repo : String, existing_rs : Ruleset, wanted : Ruleset, io : IO)
+      id = existing_rs.id
+      unless id
+        io.puts "  #{diff_add("Create ruleset '#{wanted.name}'")}"
+        return
+      end
+
+      begin
+        full = @client.get_ruleset(repo, id)
+      rescue ex
+        io.puts "  #{wanted.name}: Error fetching full ruleset: #{ex.message}"
+        return
+      end
+
+      changes = [] of String
+
+      existing_rules = Set.new(full.rules.map(&.type))
+      wanted_rules = Set.new(wanted.rules.map(&.type))
+
+      added = wanted_rules - existing_rules
+      removed = existing_rules - wanted_rules
+
+      unless added.empty? && removed.empty?
+        added.each { |r| changes << diff_add(r) }
+        removed.each { |r| changes << diff_remove(r) }
+      end
+
+      wanted.rules.each do |wanted_rule|
+        existing_rule = full.rules.find { |r| r.type == wanted_rule.type }
+        next unless existing_rule
+
+        wanted_params = wanted_rule.parameters
+        existing_params = existing_rule.parameters
+        next unless wanted_params && existing_params
+
+        wanted_params.each do |key, wanted_val|
+          existing_val = existing_params[key]?
+          if existing_val != wanted_val
+            changes << "#{key}: #{existing_val} → #{wanted_val}"
+          end
+        end
+      end
+
+      if changes.empty?
+        io.puts "  #{wanted.name}: #{diff_unchanged("no changes")}"
+      else
+        io.puts "  #{diff_change("Update ruleset '#{wanted.name}'")}"
+        changes.each { |c| io.puts "    #{c}" }
+      end
+    end
+
+    private def diff_add(text : String) : String
+      "+ #{text}".colorize.green.to_s
+    end
+
+    private def diff_remove(text : String) : String
+      "- #{text}".colorize.red.to_s
+    end
+
+    private def diff_change(text : String) : String
+      "~ #{text}".colorize.yellow.to_s
+    end
+
+    private def diff_unchanged(text : String) : String
+      "  #{text}".colorize.dim.to_s
+    end
+
+    private def diff_orphan(name : String) : String
+      "- Orphan ruleset '#{name}'".colorize.red.to_s
+    end
+
     # Applies desired ruleset configuration to repositories.
     #
     # Creates or updates rulesets for ALL configured branch types.

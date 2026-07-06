@@ -110,6 +110,8 @@ struct Options
   property repo : String? = nil
   # Preview changes without applying.
   property? dry_run : Bool = false
+  # Show diff without making changes.
+  property? diff : Bool = false
   # GitHub personal access token.
   property token : String? = nil
 
