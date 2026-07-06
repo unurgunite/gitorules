@@ -67,6 +67,8 @@ struct BranchRuleConfig
   property squash : String?
   # Allow only rebase merges. Value: "only".
   property rebase : String?
+  # Custom ruleset display name (overrides auto-generated).
+  property name : String?
   # Branch name pattern for release branches (e.g. "v*").
   property pattern : String?
   # Required status check contexts (e.g. "check / check").
@@ -83,7 +85,7 @@ struct BranchRuleConfig
   def merge_method : String?
     return "squash" if squash == "only"
     return "rebase" if rebase == "only"
-    return merge if merge == "only"
+    return "merge" if merge == "only"
     nil
   end
 end

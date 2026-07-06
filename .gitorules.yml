@@ -32,3 +32,11 @@ rules:
     pattern: v*
     # Allow only squash merges
     squash: only
+
+  # System branch rules (e.g. system/*)
+  # No required_status_checks — workflow may not exist in default branch yet
+  system:
+    # Branch name pattern
+    pattern: system/*
+    # Allow only merge commits
+    merge: only
