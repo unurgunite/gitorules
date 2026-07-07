@@ -77,6 +77,14 @@ module Gitorules
           options.org = v
         end
 
+        parser.on("--json", "Machine-readable JSON output") do
+          options.json = true
+        end
+
+        parser.on("--quiet", "Suppress all output except errors") do
+          options.quiet = true
+        end
+
         parser.on("--token TOKEN", "GitHub personal access token") do |v|
           options.token = v
         end
@@ -124,23 +132,41 @@ module Gitorules
                 loader.repo_names
               end
 
+      io = options.quiet? ? IO::Memory.new : STDOUT
+      execute_command(engine, repos, options, io)
+      0
+    end
+
+    private def self.execute_command(engine : Engine, repos : Array(String), options : Options, io : IO) : Nil
       case options.mode
       when "status"
-        engine.status(repos)
+        if options.json?
+          engine.status_json(repos, io)
+        else
+          engine.status(repos, io)
+        end
       when "apply"
         if options.diff?
-          engine.diff(repos)
+          if options.json?
+            engine.diff_json(repos, io)
+          else
+            engine.diff(repos, io)
+          end
+        elsif options.json?
+          engine.apply_json(repos, dry_run: options.dry_run?, io: io)
         else
-          engine.apply(repos, dry_run: options.dry_run?)
+          engine.apply(repos, dry_run: options.dry_run?, io: io)
         end
       when "diff"
-        engine.diff(repos)
+        if options.json?
+          engine.diff_json(repos, io)
+        else
+          engine.diff(repos, io)
+        end
       else
         STDERR.puts "gitorules: unknown subcommand '#{options.mode}'"
         raise ExitSignal.new(1)
       end
-
-      0
     end
 
     private def self.handle_init(options : Options, client : GitHubClient) : Int32

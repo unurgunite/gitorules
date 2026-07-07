@@ -118,6 +118,10 @@ struct Options
   property? dry_run : Bool = false
   # Show diff without making changes.
   property? diff : Bool = false
+  # JSON output mode (machine-readable).
+  property? json : Bool = false
+  # Suppress all output except errors.
+  property? quiet : Bool = false
   # GitHub personal access token.
   property token : String? = nil
   # GitHub organization name.
