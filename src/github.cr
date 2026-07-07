@@ -131,82 +131,54 @@ module Gitorules
     # @return [Array(Ruleset)] List of rulesets without full rule details
     # @raise [RuntimeError] On API error (4xx, 5xx)
     def list_rulesets(repo : String) : Array(Ruleset)
-      resp = get("/repos/#{repo}/rulesets")
-      Array(Ruleset).from_json(resp.body)
+      body = get("/repos/#{repo}/rulesets")
+      Array(Ruleset).from_json(body)
     end
 
-    # Fetches a single ruleset with full rule details.
-    #
-    # @param repo [String] Full repository name (owner/name)
-    # @param id [Int64] Ruleset ID from GitHub
-    # @return [Ruleset] Complete ruleset with all rules
-    # @raise [RuntimeError] On API error (4xx, 5xx)
     def get_ruleset(repo : String, id : Int64) : Ruleset
-      resp = get("/repos/#{repo}/rulesets/#{id}")
-      Ruleset.from_json(resp.body)
+      body = get("/repos/#{repo}/rulesets/#{id}")
+      Ruleset.from_json(body)
     end
 
-    # Creates a new ruleset. Returns the created ruleset with server-assigned ID.
-    #
-    # @param repo [String] Full repository name (owner/name)
-    # @param ruleset [Ruleset] Ruleset configuration to create
-    # @return [Ruleset] Created ruleset with server-assigned ID
-    # @raise [RuntimeError] On API error (4xx, 5xx)
     def create_ruleset(repo : String, ruleset : Ruleset) : Ruleset
-      resp = post("/repos/#{repo}/rulesets", ruleset.to_json)
-      Ruleset.from_json(resp.body)
+      body = post("/repos/#{repo}/rulesets", ruleset.to_json)
+      Ruleset.from_json(body)
     end
 
-    # Replaces an existing ruleset. PUT is a full replacement, not a merge.
-    #
-    # @param repo [String] Full repository name (owner/name)
-    # @param id [Int64] Ruleset ID to update
-    # @param ruleset [Ruleset] New ruleset configuration (replaces entirely)
-    # @return [Ruleset] Updated ruleset from server
-    # @raise [RuntimeError] On API error (4xx, 5xx)
     def update_ruleset(repo : String, id : Int64, ruleset : Ruleset) : Ruleset
-      resp = put("/repos/#{repo}/rulesets/#{id}", ruleset.to_json)
-      Ruleset.from_json(resp.body)
+      body = put("/repos/#{repo}/rulesets/#{id}", ruleset.to_json)
+      Ruleset.from_json(body)
     end
 
-    # Lists repository names for an organization.
-    #
-    # @param org [String] GitHub organization name
-    # @param type [String] Repository type filter (default: "owner")
-    # @return [Array(String)] List of repository names (without org prefix)
-    # @raise [RuntimeError] On API error (4xx, 5xx)
     def list_repos(org : String, type : String = "owner") : Array(String)
-      resp = get("/orgs/#{org}/repos?per_page=100&type=#{type}")
-      Array(JSON::Any).from_json(resp.body).map(&.["name"].to_s)
+      body = get("/orgs/#{org}/repos?per_page=100&type=#{type}")
+      Array(JSON::Any).from_json(body).map(&.["name"].to_s)
     end
 
     # Performs an authenticated GET request.
     #
     # @param path [String] API path (e.g., "/repos/owner/name/rulesets")
-    # @return [HTTP::Client::Response] Raw response
+    # @return [String] Response body
     # @raise [RuntimeError] On API error via handle_errors
-    private def get(path : String) : HTTP::Client::Response
+    private def get(path : String) : String
       ensure_token!
-      HTTP::Client.get("#{BASE_URL}#{path}", headers: @headers) do |resp|
-        handle_errors(resp)
-        return resp
-      end
+      resp = HTTP::Client.get("#{BASE_URL}#{path}", headers: @headers)
+      handle_errors(resp)
+      resp.body
     end
 
-    private def post(path : String, body : String) : HTTP::Client::Response
+    private def post(path : String, body : String) : String
       ensure_token!
-      HTTP::Client.post("#{BASE_URL}#{path}", headers: @headers, body: body) do |resp|
-        handle_errors(resp)
-        return resp
-      end
+      resp = HTTP::Client.post("#{BASE_URL}#{path}", headers: @headers, body: body)
+      handle_errors(resp)
+      resp.body
     end
 
-    private def put(path : String, body : String) : HTTP::Client::Response
+    private def put(path : String, body : String) : String
       ensure_token!
-      HTTP::Client.put("#{BASE_URL}#{path}", headers: @headers, body: body) do |resp|
-        handle_errors(resp)
-        return resp
-      end
+      resp = HTTP::Client.put("#{BASE_URL}#{path}", headers: @headers, body: body)
+      handle_errors(resp)
+      resp.body
     end
 
     # Checks API response status and raises on errors.
