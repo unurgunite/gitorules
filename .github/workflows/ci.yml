@@ -1,10 +1,6 @@
 name: CI
 
-on:
-  push:
-    branches: [master, v*]
-  pull_request:
-    branches: [master, v*]
+on: [push, pull_request]
 
 jobs:
   check-source:
@@ -16,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        crystal: [1.12.0, 1.14.0]
+        crystal: [1.14.0, 1.20.0]
 
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +34,7 @@ jobs:
         run: shards install
 
       - name: Check formatting
+        if: matrix.crystal == '1.20.0'
         run: crystal tool format --check
 
       - name: Lint
