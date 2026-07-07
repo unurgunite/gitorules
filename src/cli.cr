@@ -171,6 +171,7 @@ module Gitorules
       end
 
       STDERR.puts "Error: no auth method configured. Use --token / GITHUB_TOKEN for PAT, or --app-id + --private-key + --installation-id / GITHUB_APP_* env for GitHub App"
+      STDERR.puts "Create a token: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"
       raise ExitSignal.new(1)
     end
 

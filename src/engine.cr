@@ -32,10 +32,10 @@ module Gitorules
     # @param types [Array(String)] Configured branch type keys
     # @param io [IO] Output stream
     private def status_print_header(types : Array(String), io : IO)
-      header = "%-40s " % ["Repository"]
-      types.each { |t| header += "%-24s " % [type_label(t)] }
+      header = pad_to("Repository", 40) + " "
+      types.each { |t| header += pad_to(type_label(t), 24) + " " }
       io.puts header
-      io.puts "─" * (42 + types.size * 25)
+      io.puts "─" * (41 + types.size * 25)
     end
 
     # Prints one row of the status table for a single repository.
@@ -58,8 +58,8 @@ module Gitorules
         return
       end
 
-      line = "%-40s " % [repo]
-      types.each { |t| line += "%-24s " % [results.fetch(t, "✗ MISSING".colorize.red.to_s)] }
+      line = pad_to(repo, 40) + " "
+      types.each { |t| line += pad_to(results.fetch(t, "✗ MISSING".colorize.red.to_s), 24) + " " }
       io.puts line
     end
 
@@ -769,6 +769,19 @@ module Gitorules
         @client.create_ruleset(repo, wanted)
         io.puts "#{repo}: Created ruleset '#{wanted.name}'"
       end
+    end
+
+    # Pads a possibly-colorized string to a given visible width.
+    #
+    # Strips ANSI escape codes to calculate the visible length,
+    # then appends spaces so the total visible width matches `width`.
+    #
+    # @param text [String] String that may contain ANSI color codes
+    # @param width [Int32] Desired visible width (in characters)
+    # @return [String] Padded string (ANSI codes preserved)
+    private def pad_to(text : String, width : Int32) : String
+      plain = text.gsub(/\e\[[0-9;]*m/, "")
+      text + " " * Math.max(0, width - plain.size)
     end
 
     # Returns a human-readable label for status column headers.
