@@ -24,13 +24,26 @@ module Gitorules
 
     # Resolves full repository names from config.
     #
-    # Returns explicit `repos` list if present, otherwise discovers
-    # all repos in the configured org via GitHub API. Each name is
-    # prefixed with the org (e.g., "unurgunite/docscribe").
+    # Supports single-org mode (`org` + `repos`) and multi-org mode
+    # (`orgs` hash). In multi-org mode each repo name is prefixed
+    # with its org. Repos can be auto-discovered via GitHub API
+    # when only org name is given without explicit repo list.
     #
     # @return [Array(String)] Full repository names
-    # @raise [RuntimeError] If neither repos nor org is configured
+    # @raise [RuntimeError] If no repos or org configured
     def repo_names : Array(String)
+      if orgs = @config.orgs
+        names = [] of String
+        orgs.each do |org_name, org_config|
+          if repos = org_config.repos
+            repos.each { |r| names << "#{org_name}/#{r}" }
+          else
+            names.concat(discover_repos(org_name))
+          end
+        end
+        return names
+      end
+
       if repos = @config.repos
         return repos
       end

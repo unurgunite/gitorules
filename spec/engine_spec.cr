@@ -441,5 +441,90 @@ module Gitorules
         json[0]["error"].to_s.should contain("Not found")
       end
     end
+
+    describe "multi-org" do
+      before_each do
+        WebMock.reset
+      end
+
+      multi_org_config = Config.from_yaml(<<-YAML)
+        orgs:
+          unurgunite:
+            repos:
+              - docscribe
+            rules:
+              default_branch:
+                merge: only
+              release:
+                pattern: v*
+                squash: only
+          fintech:
+            repos:
+              - payment-api
+            rules:
+              default_branch:
+                squash: only
+        YAML
+
+      multi_engine = Engine.new(client, multi_org_config)
+
+      it "#status uses per-org rules" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/1")
+          .to_return(body: %({"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}}
+          ]}))
+
+        io = IO::Memory.new
+        multi_engine.status(["unurgunite/docscribe", "fintech/payment-api"], io)
+        output = io.to_s
+        output.should contain("default")
+        output.should contain("release")
+        output.should_not contain("hotfix")
+      end
+
+      it "#diff shows create for both org repos" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+        WebMock.stub(:get, "https://api.github.com/repos/fintech/payment-api/rulesets")
+          .to_return(body: "[]")
+
+        io = IO::Memory.new
+        multi_engine.diff(["unurgunite/docscribe", "fintech/payment-api"], io)
+        output = io.to_s
+        output.scan(/\+ Create/).size.should eq(3) # 2 for unurgunite + 1 for fintech
+      end
+
+      it "#apply uses per-org rules for dry-run" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+        WebMock.stub(:get, "https://api.github.com/repos/fintech/payment-api/rulesets")
+          .to_return(body: "[]")
+
+        io = IO::Memory.new
+        multi_engine.apply(["unurgunite/docscribe", "fintech/payment-api"], dry_run: true, io: io)
+        output = io.to_s
+        output.should contain("unurgunite/docscribe: Would create")
+        output.should contain("fintech/payment-api: Would create")
+      end
+
+      it "#status_json includes multi-org types" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/1")
+          .to_return(body: %({"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}}
+          ]}))
+
+        io = IO::Memory.new
+        multi_engine.status_json(["unurgunite/docscribe"], io)
+        json = JSON.parse(io.to_s).as_a
+        json[0]["types"]["default_branch"]["exists"].should be_true
+        json[0]["types"]["release"]["exists"].should be_false
+      end
+    end
   end
 end

@@ -93,6 +93,21 @@ struct BranchRuleConfig
   end
 end
 
+# Per-org configuration within a multi-org config.
+#
+# Each org can have its own repository list and rules.
+struct OrgConfig
+  include YAML::Serializable
+
+  def initialize
+  end
+
+  # Explicit list of repository names (short names, e.g. ["docscribe"]).
+  property repos : Array(String)?
+  # Map of branch type names to their rule configuration.
+  property rules : Hash(String, BranchRuleConfig)?
+end
+
 # Top-level `.gitorules.yml` configuration.
 struct Config
   include YAML::Serializable
@@ -100,12 +115,39 @@ struct Config
   def initialize
   end
 
-  # GitHub organization name. When set, repos can be auto-discovered.
+  # GitHub organization name (single-org mode).
   property org : String?
-  # Explicit list of repository names (with or without org prefix).
+  # Explicit list of repository names (single-org mode).
   property repos : Array(String)?
-  # Map of branch type names to their rule configuration.
+  # Map of branch type names to their rule configuration (single-org mode).
   property rules : Hash(String, BranchRuleConfig)?
+  # Multi-org configuration (overrides single-org fields).
+  property orgs : Hash(String, OrgConfig)?
+
+  # Returns rules for a specific repo, considering multi-org config.
+  #
+  # In single-org mode returns top-level rules.
+  # In multi-org mode looks up which org owns the repo.
+  #
+  # @param repo [String] Full repository name (org/repo)
+  # @return [Hash(String, BranchRuleConfig)?] Rules for the repo's org
+  def rules_for(repo : String) : Hash(String, BranchRuleConfig)?
+    return self.rules if self.rules # single-org mode
+
+    org_name = repo.split("/").first?
+    if org_name && (config_orgs = self.orgs)
+      org_config = config_orgs[org_name]?
+      return org_config.rules if org_config
+    end
+
+    nil
+  end
+
+  # Returns all known type keys across all orgs (for column headers).
+  def all_type_keys : Array(String)
+    org_keys = orgs.try &.values.flat_map { |o| o.rules.try(&.keys) || [] of String } || [] of String
+    (org_keys + (rules.try(&.keys) || [] of String)).uniq
+  end
 end
 
 # CLI options passed via command-line flags.
