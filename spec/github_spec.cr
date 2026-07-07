@@ -122,5 +122,63 @@ module Gitorules
         end
       end
     end
+
+    describe "GitHub App auth" do
+      app_id = "123456"
+      installation_id = "789012"
+      test_private_key = File.read("spec/fixtures/test_private_key.pem")
+
+      before_each do
+        WebMock.reset
+      end
+
+      it "exchanges JWT for installation token on init" do
+        WebMock.stub(:post, "https://api.github.com/app/installations/789012/access_tokens")
+          .to_return(body: %({"token": "inst_token_abc", "expires_at": "2027-01-01T00:00:00Z"}))
+
+        app_client = GitHubClient.new(app_id, test_private_key, installation_id)
+        app_client.token.should eq "inst_token_abc"
+      end
+
+      it "refreshes expired token on next API call" do
+        call_count = 0
+        WebMock.stub(:post, "https://api.github.com/app/installations/789012/access_tokens")
+          .to_return do |_req|
+            call_count += 1
+            body = call_count == 1 ? %({"token": "inst_token_old", "expires_at": "2020-01-01T00:00:00Z"}) : %({"token": "inst_token_new", "expires_at": "2027-01-01T00:00:00Z"})
+            HTTP::Client::Response.new(200, body: body, headers: HTTP::Headers{"Content-Type" => "application/json"})
+          end
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        app_client = GitHubClient.new(app_id, test_private_key, installation_id)
+        app_client.token.should eq "inst_token_old"
+        app_client.list_rulesets("unurgunite/docscribe")
+        app_client.token.should eq "inst_token_new"
+      end
+
+      it "handles token exchange error" do
+        WebMock.stub(:post, "https://api.github.com/app/installations/789012/access_tokens")
+          .to_return(status: 401, body: "Bad credentials")
+
+        expect_raises(Exception, "HTTP 401") do
+          GitHubClient.new(app_id, test_private_key, installation_id)
+        end
+      end
+
+      it "uses installation token for API calls" do
+        WebMock.stub(:post, "https://api.github.com/app/installations/789012/access_tokens")
+          .to_return(body: %({"token": "inst_token", "expires_at": "2027-01-01T00:00:00Z"}))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .with(headers: {"Authorization" => "Bearer inst_token"})
+          .to_return(body: "[]")
+
+        app_client = GitHubClient.new(app_id, test_private_key, installation_id)
+        result = app_client.list_rulesets("unurgunite/docscribe")
+        result.should be_a(Array(Ruleset))
+      end
+    end
   end
 end

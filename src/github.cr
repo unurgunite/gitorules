@@ -1,15 +1,34 @@
 require "http/client"
 require "json"
+require "openssl"
+require "base64"
 
 module Gitorules
   # HTTP client for the GitHub REST API.
   #
   # Supports Rulesets and Repos endpoints. Authentication via
-  # personal access token passed as Bearer token.
+  # personal access token or GitHub App (JWT → installation token).
   class GitHubClient
     BASE_URL = "https://api.github.com"
 
-    # Creates a client with the given GitHub token.
+    # Cached installation token with expiry time.
+    private record AppInstallationToken, token : String, expires_at : Time do
+      def expired? : Bool
+        Time.utc >= expires_at
+      end
+    end
+
+    @token : String?
+    @app_id : String?
+    @private_key : String?
+    @installation_id : String?
+    @cached_token : AppInstallationToken?
+    @headers : HTTP::Headers
+
+    # Returns the effective auth token (PAT or installation token).
+    getter token : String?
+
+    # Creates a client with PAT auth.
     #
     # @param token [String] GitHub personal access token
     def initialize(@token : String)
@@ -18,6 +37,89 @@ module Gitorules
         "Accept"        => "application/vnd.github+json",
         "User-Agent"    => "gitorules/0.1.0",
       }
+    end
+
+    # Creates a client with GitHub App auth.
+    #
+    # Generates a JWT from the app credentials, exchanges it for an
+    # installation token, and auto-refreshes the token when expired.
+    #
+    # @param app_id [String] GitHub App ID
+    # @param private_key [String] RSA private key in PEM format
+    # @param installation_id [String] GitHub App installation ID
+    def initialize(@app_id : String, @private_key : String, @installation_id : String)
+      @token = nil
+      token = fetch_installation_token
+      @cached_token = token
+      @token = token.token
+      @headers = HTTP::Headers{
+        "Authorization" => "Bearer #{token.token}",
+        "Accept"        => "application/vnd.github+json",
+        "User-Agent"    => "gitorules/0.1.0",
+      }
+    end
+
+    # Ensures the installation token is still valid.
+    #
+    # For PAT mode this is a no-op. For GitHub App mode, refreshes
+    # the token via JWT exchange if the current one is expired.
+    private def ensure_token!
+      token = @cached_token
+      return unless token
+      return unless token.expired?
+      fresh = fetch_installation_token
+      @cached_token = fresh
+      @token = fresh.token
+      @headers["Authorization"] = "Bearer #{fresh.token}"
+    end
+
+    # Fetches a fresh installation token from GitHub.
+    #
+    # Generates a short-lived JWT and exchanges it for an installation
+    # access token (valid 1 hour).
+    #
+    # @return [AppInstallationToken] New token with expiry
+    private def fetch_installation_token : AppInstallationToken
+      jwt = generate_jwt
+      resp = HTTP::Client.post(
+        "#{BASE_URL}/app/installations/#{@installation_id}/access_tokens",
+        headers: HTTP::Headers{
+          "Authorization" => "Bearer #{jwt}",
+          "Accept"        => "application/vnd.github+json",
+        },
+        body: "{}"
+      )
+      handle_errors(resp)
+      json = JSON.parse(resp.body)
+      token = json["token"].to_s
+      expires_at = Time.parse_iso8601(json["expires_at"].to_s)
+      AppInstallationToken.new(token, expires_at)
+    end
+
+    # Generates a RS256 JWT for GitHub App authentication.
+    #
+    # The JWT is signed with the app's RSA private key and contains
+    # the app ID (iss), issued-at (iat), and expiration (exp = now + 10 min).
+    # Uses system `openssl` CLI for signing (no external Crystal shards).
+    #
+    # @return [String] Signed JWT string
+    private def generate_jwt : String
+      header = Base64.urlsafe_encode(%({"alg":"RS256","typ":"JWT"}), padding: false)
+      now = Time.utc.to_unix
+      payload = Base64.urlsafe_encode(%({"iat":#{now},"exp":#{now + 600},"iss":"#{@app_id}"}), padding: false)
+      data = "#{header}.#{payload}"
+
+      sig_input = IO::Memory.new(data)
+      sig_output = IO::Memory.new
+      key_path = File.tempname("gitorules-key")
+      File.write(key_path, @private_key)
+
+      Process.run("openssl", ["dgst", "-sha256", "-sign", key_path],
+        input: sig_input, output: sig_output, error: STDERR)
+      File.delete(key_path)
+
+      sig = Base64.urlsafe_encode(sig_output.to_s, padding: false)
+      "#{data}.#{sig}"
     end
 
     # Lists rulesets for a repository (summary, without full rules).
@@ -84,32 +186,23 @@ module Gitorules
     # @return [HTTP::Client::Response] Raw response
     # @raise [RuntimeError] On API error via handle_errors
     private def get(path : String) : HTTP::Client::Response
+      ensure_token!
       HTTP::Client.get("#{BASE_URL}#{path}", headers: @headers) do |resp|
         handle_errors(resp)
         return resp
       end
     end
 
-    # Performs an authenticated POST request with JSON body.
-    #
-    # @param path [String] API path (e.g., "/repos/owner/name/rulesets")
-    # @param body [String] JSON request body
-    # @return [HTTP::Client::Response] Raw response
-    # @raise [RuntimeError] On API error via handle_errors
     private def post(path : String, body : String) : HTTP::Client::Response
+      ensure_token!
       HTTP::Client.post("#{BASE_URL}#{path}", headers: @headers, body: body) do |resp|
         handle_errors(resp)
         return resp
       end
     end
 
-    # Performs an authenticated PUT request with JSON body.
-    #
-    # @param path [String] API path (e.g., "/repos/owner/name/rulesets/1")
-    # @param body [String] JSON request body (full replacement)
-    # @return [HTTP::Client::Response] Raw response
-    # @raise [RuntimeError] On API error via handle_errors
     private def put(path : String, body : String) : HTTP::Client::Response
+      ensure_token!
       HTTP::Client.put("#{BASE_URL}#{path}", headers: @headers, body: body) do |resp|
         handle_errors(resp)
         return resp

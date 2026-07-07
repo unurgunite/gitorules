@@ -89,6 +89,25 @@ module Gitorules
           options.token = v
         end
 
+        parser.on("--app-id ID", "GitHub App ID (for GitHub App auth)") do |v|
+          options.app_id = v
+        end
+
+        parser.on("--private-key PEM", "GitHub App private key (PEM content)") do |v|
+          options.private_key = v
+        end
+
+        parser.on("--private-key-path PATH", "Path to GitHub App private key PEM file") do |v|
+          options.private_key = File.read(v)
+        rescue ex
+          STDERR.puts "Error reading private key: #{ex.message}"
+          raise ExitSignal.new(1)
+        end
+
+        parser.on("--installation-id ID", "GitHub App installation ID") do |v|
+          options.installation_id = v
+        end
+
         parser.on("--config PATH", "Path to config file (default: .gitorules.yml)") do |v|
           config_path = v
         end
@@ -104,17 +123,17 @@ module Gitorules
         end
       end
 
-      token = options.token || ENV["GITHUB_TOKEN"]?
-      unless token
-        STDERR.puts "Error: GITHUB_TOKEN not set. Use --token or set GITHUB_TOKEN env"
-        raise ExitSignal.new(1)
-      end
-
-      client = GitHubClient.new(token)
+      client = build_client(options)
 
       # Handle init separately — no config needed
       if options.mode == "init"
         return handle_init(options, client)
+      end
+
+      token = client.token
+      unless token
+        STDERR.puts "Error: no auth token available"
+        raise ExitSignal.new(1)
       end
 
       begin
@@ -135,6 +154,24 @@ module Gitorules
       io = options.quiet? ? IO::Memory.new : STDOUT
       execute_command(engine, repos, options, io)
       0
+    end
+
+    private def self.build_client(options : Options) : GitHubClient
+      app_id = options.app_id || ENV["GITHUB_APP_ID"]?
+      private_key = options.private_key || ENV["GITHUB_APP_PRIVATE_KEY"]?
+      installation_id = options.installation_id || ENV["GITHUB_APP_INSTALLATION_ID"]?
+
+      if app_id && private_key && installation_id
+        return GitHubClient.new(app_id, private_key, installation_id)
+      end
+
+      token = options.token || ENV["GITHUB_TOKEN"]?
+      if token
+        return GitHubClient.new(token)
+      end
+
+      STDERR.puts "Error: no auth method configured. Use --token / GITHUB_TOKEN for PAT, or --app-id + --private-key + --installation-id / GITHUB_APP_* env for GitHub App"
+      raise ExitSignal.new(1)
     end
 
     private def self.execute_command(engine : Engine, repos : Array(String), options : Options, io : IO) : Nil
