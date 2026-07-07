@@ -166,6 +166,12 @@ struct Options
   property? quiet : Bool = false
   # GitHub personal access token.
   property token : String? = nil
+  # GitHub App ID (for GitHub App auth).
+  property app_id : String? = nil
+  # GitHub App private key content (for GitHub App auth).
+  property private_key : String? = nil
+  # GitHub App installation ID (for GitHub App auth).
+  property installation_id : String? = nil
   # GitHub organization name.
   property org : String? = nil
 
