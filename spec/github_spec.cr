@@ -179,6 +179,12 @@ module Gitorules
         result = app_client.list_rulesets("unurgunite/docscribe")
         result.should be_a(Array(Ruleset))
       end
+
+      it "raises on invalid private key with meaningful message" do
+        expect_raises(Exception, "JWT signing failed") do
+          GitHubClient.new(app_id, "not-a-valid-key", installation_id)
+        end
+      end
     end
   end
 end
