@@ -42,7 +42,7 @@ struct Ruleset
   # Conditions that determine which branches/tags this ruleset applies to.
   property conditions : Hash(String, JSON::Any)?
   # Ordered list of rules to enforce.
-  property rules : Array(Rule)
+  property rules : Array(Rule) = [] of Rule
 
   def initialize(
     @name : String,
