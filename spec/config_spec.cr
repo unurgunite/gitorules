@@ -92,5 +92,97 @@ module Gitorules
         File.delete("/tmp/test_gitorules_none.yml") if File.exists?("/tmp/test_gitorules_none.yml")
       end
     end
+
+    describe "multi-org" do
+      it "parses orgs config and returns prefixed repo names" do
+        config_yaml = <<-YAML
+          orgs:
+            unurgunite:
+              repos:
+                - docscribe
+                - gitorules
+              rules:
+                default_branch:
+                  merge: only
+            fintech:
+              repos:
+                - payment-api
+              rules:
+                default_branch:
+                  squash: only
+          YAML
+
+        File.write("/tmp/test_gitorules_multi.yml", config_yaml)
+        loader = ConfigLoader.new("/tmp/test_gitorules_multi.yml", token)
+        names = loader.repo_names
+        names.should contain("unurgunite/docscribe")
+        names.should contain("unurgunite/gitorules")
+        names.should contain("fintech/payment-api")
+      ensure
+        File.delete("/tmp/test_gitorules_multi.yml") if File.exists?("/tmp/test_gitorules_multi.yml")
+      end
+
+      it "returns correct rules per repo via rules_for" do
+        config_yaml = <<-YAML
+          orgs:
+            unurgunite:
+              repos:
+                - docscribe
+              rules:
+                default_branch:
+                  merge: only
+            fintech:
+              repos:
+                - payment-api
+              rules:
+                default_branch:
+                  squash: only
+          YAML
+
+        File.write("/tmp/test_gitorules_rules_for.yml", config_yaml)
+        loader = ConfigLoader.new("/tmp/test_gitorules_rules_for.yml", token)
+
+        unurgunite_rules = loader.config.rules_for("unurgunite/docscribe")
+        unurgunite_rules.should_not be_nil
+        unurgunite_rules.try(&.["default_branch"].merge).should eq "only"
+
+        fintech_rules = loader.config.rules_for("fintech/payment-api")
+        fintech_rules.should_not be_nil
+        fintech_rules.try(&.["default_branch"].squash).should eq "only"
+      ensure
+        File.delete("/tmp/test_gitorules_rules_for.yml") if File.exists?("/tmp/test_gitorules_rules_for.yml")
+      end
+
+      it "all_type_keys aggregates types from all orgs" do
+        config_yaml = <<-YAML
+          orgs:
+            unurgunite:
+              repos:
+                - docscribe
+              rules:
+                default_branch:
+                  merge: only
+                release:
+                  squash: only
+            fintech:
+              repos:
+                - payment-api
+              rules:
+                default_branch:
+                  squash: only
+                hotfix:
+                  merge: only
+          YAML
+
+        File.write("/tmp/test_gitorules_all_types.yml", config_yaml)
+        loader = ConfigLoader.new("/tmp/test_gitorules_all_types.yml", token)
+        keys = loader.config.all_type_keys
+        keys.should contain("default_branch")
+        keys.should contain("release")
+        keys.should contain("hotfix")
+      ensure
+        File.delete("/tmp/test_gitorules_all_types.yml") if File.exists?("/tmp/test_gitorules_all_types.yml")
+      end
+    end
   end
 end

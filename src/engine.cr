@@ -22,7 +22,7 @@ module Gitorules
     # @param repos [Array(String)] Full repository names
     # @param io [IO] Output stream (default: STDOUT)
     def status(repos : Array(String), io : IO = STDOUT)
-      types = @config.rules.try(&.keys) || [] of String
+      types = @config.all_type_keys
       status_print_header(types, io)
       repos.each { |repo| status_repo_line(repo, types, io) }
     end
@@ -48,10 +48,11 @@ module Gitorules
     # @param io [IO] Output stream
     private def status_repo_line(repo : String, types : Array(String), io : IO)
       results = {} of String => String
+      rules = @config.rules_for(repo)
 
       begin
         rulesets = @client.list_rulesets(repo)
-        types.each { |type| results[type] = status_type_result(repo, rulesets, type) }
+        types.each { |type| results[type] = status_type_result(repo, rulesets, type, rules) }
       rescue ex
         io.puts "%s  Error: %s" % [repo, ex.message]
         return
@@ -71,8 +72,8 @@ module Gitorules
     # @param rulesets [Array(Ruleset)] Existing rulesets for the repo
     # @param type [String] Branch type key
     # @return [String] Colorized status string
-    private def status_type_result(repo : String, rulesets : Array(Ruleset), type : String) : String
-      rule_config = @config.rules.try { |r| r[type] }
+    private def status_type_result(repo : String, rulesets : Array(Ruleset), type : String, rules : Hash(String, BranchRuleConfig)?) : String
+      rule_config = rules.try { |r| r[type] }
       names = type_match_names(type, rule_config)
       rs = rulesets.find(&.name.in?(names))
       id = rs.try(&.id)
@@ -120,7 +121,7 @@ module Gitorules
     # @param repos [Array(String)] Full repository names
     # @param io [IO] Output stream (default: STDOUT)
     def status_json(repos : Array(String), io : IO = STDOUT)
-      types = @config.rules.try(&.keys) || [] of String
+      types = @config.all_type_keys
       io.puts(JSON.build do |json|
         json.array do
           repos.each do |repo|
@@ -134,11 +135,12 @@ module Gitorules
     end
 
     private def status_json_repo(json : JSON::Builder, repo : String, types : Array(String))
+      rules = @config.rules_for(repo)
       rulesets = @client.list_rulesets(repo)
       json.field "types" do
         json.object do
           types.each do |type|
-            rule_config = @config.rules.try { |r| r[type] }
+            rule_config = rules.try { |r| r[type] }
             names = type_match_names(type, rule_config)
             rs = rulesets.find(&.name.in?(names))
             json.field type do
@@ -235,8 +237,8 @@ module Gitorules
           json.array do
             matched = Set(String).new
 
-            if rules = @config.rules
-              rules.each do |type, config|
+            if repo_rules = @config.rules_for(repo)
+              repo_rules.each do |type, config|
                 wanted = build_type_ruleset(type, config)
                 names = type_match_names(type, config)
                 found = existing.find(&.name.in?(names))
@@ -347,8 +349,8 @@ module Gitorules
 
       matched = Set(String).new
 
-      if rules = @config.rules
-        rules.each do |type, config|
+      if repo_rules = @config.rules_for(repo)
+        repo_rules.each do |type, config|
           wanted = build_type_ruleset(type, config)
           names = type_match_names(type, config)
           found = existing.find(&.name.in?(names))
@@ -534,8 +536,8 @@ module Gitorules
         json.field "repo", repo
         json.field "results" do
           json.array do
-            if rules = @config.rules
-              rules.each do |type, config|
+            if repo_rules = @config.rules_for(repo)
+              repo_rules.each do |type, config|
                 wanted = build_type_ruleset(type, config)
                 names = type_match_names(type, config)
                 found = existing.find(&.name.in?(names))
@@ -577,8 +579,8 @@ module Gitorules
     private def apply_repo(repo : String, dry_run : Bool, io : IO)
       existing = @client.list_rulesets(repo)
 
-      if rules = @config.rules
-        rules.each do |type, config|
+      if repo_rules = @config.rules_for(repo)
+        repo_rules.each do |type, config|
           wanted = build_type_ruleset(type, config)
           names = type_match_names(type, config)
           found = existing.find(&.name.in?(names))

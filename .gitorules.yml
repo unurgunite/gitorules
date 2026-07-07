@@ -6,37 +6,29 @@
 #   gitorules apply           # Apply configuration
 #   gitorules apply --dry-run # Preview changes without applying
 
-# GitHub organization (used for auto-discovery when repos list is omitted)
-org: unurgunite
+# Single-org mode:
+#   org: unurgunite
+#   repos:
+#     - docscribe
+#   rules:
+#     default_branch:
+#       merge: only
 
-# Explicit repository list (alternative to org auto-discovery)
-# When org is set, you can list specific repos or omit to discover all.
-repos:
-  - docscribe
-  - irb-autosuggestions
-  - gitorules
-
-# Branch ruleset definitions
-rules:
-  # Default branch (master/main) rules
-  default_branch:
-    # Allow only merge commits (no squash, no rebase)
-    merge: only
-    # Require status checks to pass before merge
-    checks:
-      - "check / check"
-
-  # Release branch rules
-  release:
-    # Branch name pattern (glob)
-    pattern: v*
-    # Allow only squash merges
-    squash: only
-
-  # System branch rules (e.g. system/*)
-  # No required_status_checks — workflow may not exist in default branch yet
-  system:
-    # Branch name pattern
-    pattern: system/*
-    # Allow only merge commits
-    merge: only
+# Multi-org mode (uncomment to use):
+orgs:
+  unurgunite:
+    repos:
+      - docscribe
+      - irb-autosuggestions
+      - gitorules
+    rules:
+      default_branch:
+        merge: only
+        checks:
+          - "check / check"
+      release:
+        pattern: v*
+        squash: only
+      system:
+        pattern: system/*
+        merge: only
