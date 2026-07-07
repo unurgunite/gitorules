@@ -4,7 +4,7 @@ version: 0.1.0
 authors:
   - unurgunite
 
-crystal: ">= 1.12.0"
+crystal: ">= 1.14.0"
 
 license: MIT
 
