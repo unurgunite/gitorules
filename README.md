@@ -3,7 +3,7 @@
 <p align="center">
 <a href="https://github.com/unurgunite/gitorules/actions"><img src="https://github.com/unurgunite/gitorules/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
 <a href="https://github.com/unurgunite/gitorules/blob/master/LICENSE"><img src="https://img.shields.io/github/license/unurgunite/gitorules.svg" alt="License"></a>
-<a href="https://crystal-lang.org"><img src="https://img.shields.io/badge/crystal-%3E%3D%201.12-blue.svg" alt="Crystal"></a>
+<a href="https://crystal-lang.org"><img src="https://img.shields.io/badge/crystal-%3E%3D%201.14-blue.svg" alt="Crystal"></a>
 </p>
 
 Declarative GitHub Ruleset Manager.
@@ -41,7 +41,7 @@ shards install
 crystal build src/gitorules.cr --release -o gitorules
 ```
 
-Requires Crystal 1.12+.
+Requires Crystal 1.14+.
 
 ## CLI
 
@@ -51,31 +51,31 @@ gitorules <status|apply|diff|init> [options]
 
 ### Commands
 
-| Command    | Description                                      |
-|------------|--------------------------------------------------|
-| `status`   | Show ruleset status for repositories             |
-| `apply`    | Apply ruleset configuration from `.gitorules.yml` |
-| `diff`     | Show pending changes without applying             |
-| `init`     | Generate `.gitorules.yml` from existing rulesets  |
+| Command  | Description                                       |
+|----------|---------------------------------------------------|
+| `status` | Show ruleset status for repositories              |
+| `apply`  | Apply ruleset configuration from `.gitorules.yml` |
+| `diff`   | Show pending changes without applying             |
+| `init`   | Generate `.gitorules.yml` from existing rulesets  |
 
 ### Options
 
-| Flag                     | Description                                        |
-|--------------------------|----------------------------------------------------|
-| `--dry-run`              | Preview apply changes without making them          |
-| `--diff`                 | Show pending changes (same as `diff` command)      |
-| `--repo REPO`            | Target a single repository (`owner/name`)          |
-| `--org ORG`              | GitHub organization name (for `init`)              |
-| `--json`                 | Machine-readable JSON output                       |
-| `--quiet`                | Suppress all output except errors                  |
-| `--token TOKEN`          | GitHub personal access token                       |
-| `--app-id ID`            | GitHub App ID (for GitHub App auth)                |
-| `--private-key PEM`      | GitHub App private key (PEM content)               |
-| `--private-key-path PATH`| Path to GitHub App private key PEM file            |
-| `--installation-id ID`   | GitHub App installation ID                         |
-| `--config PATH`          | Path to config file (default: `.gitorules.yml`)    |
-| `--version`              | Show version                                       |
-| `-h`, `--help`           | Show help                                          |
+| Flag                      | Description                                     |
+|---------------------------|-------------------------------------------------|
+| `--dry-run`               | Preview apply changes without making them       |
+| `--diff`                  | Show pending changes (same as `diff` command)   |
+| `--repo REPO`             | Target a single repository (`owner/name`)       |
+| `--org ORG`               | GitHub organization name (for `init`)           |
+| `--json`                  | Machine-readable JSON output                    |
+| `--quiet`                 | Suppress all output except errors               |
+| `--token TOKEN`           | GitHub personal access token                    |
+| `--app-id ID`             | GitHub App ID (for GitHub App auth)             |
+| `--private-key PEM`       | GitHub App private key (PEM content)            |
+| `--private-key-path PATH` | Path to GitHub App private key PEM file         |
+| `--installation-id ID`    | GitHub App installation ID                      |
+| `--config PATH`           | Path to config file (default: `.gitorules.yml`) |
+| `--version`               | Show version                                    |
+| `-h`, `--help`            | Show help                                       |
 
 ### Exit codes
 
@@ -132,19 +132,19 @@ orgs:
 
 ### Rule types
 
-| Key               | Description                                | Values                                            |
-|-------------------|--------------------------------------------|---------------------------------------------------|
-| `pattern`         | Branch pattern (default: `master`)         | Glob pattern or branch name                       |
-| `merge`           | Merge method restriction                   | `only`, `false` (omit for all methods)            |
-| `rebase`          | Rebase method restriction                  | `only`, `false`                                   |
-| `squash`          | Squash method restriction                  | `only`, `false`                                   |
-| `checks`          | Required status checks                     | List of check context strings                     |
-| `required_approvals` | Required approving reviews              | Integer (default: 0)                              |
-| `dismiss_stale`   | Dismiss approvals on new push              | `true`, `false` (default: `true`)                 |
-| `require_code_owner` | Require code owner review               | `true`, `false` (default: `false`)                |
-| `enforce_admins`  | Enforce rules for admins                   | `true`, `false` (default: `true`)                 |
-| `deletion`        | Allow deletion (default: `true`)           | `true`, `false` — set to `false` to protect branch |
-| `non_fast_forward`| Allow non-fast-forward pushes              | `true`, `false` (default: `false`)                |
+| Key                  | Description                        | Values                                             |
+|----------------------|------------------------------------|----------------------------------------------------|
+| `pattern`            | Branch pattern (default: `master`) | Glob pattern or branch name                        |
+| `merge`              | Merge method restriction           | `only`, `false` (omit for all methods)             |
+| `rebase`             | Rebase method restriction          | `only`, `false`                                    |
+| `squash`             | Squash method restriction          | `only`, `false`                                    |
+| `checks`             | Required status checks             | List of check context strings                      |
+| `required_approvals` | Required approving reviews         | Integer (default: 0)                               |
+| `dismiss_stale`      | Dismiss approvals on new push      | `true`, `false` (default: `true`)                  |
+| `require_code_owner` | Require code owner review          | `true`, `false` (default: `false`)                 |
+| `enforce_admins`     | Enforce rules for admins           | `true`, `false` (default: `true`)                  |
+| `deletion`           | Allow deletion (default: `true`)   | `true`, `false` — set to `false` to protect branch |
+| `non_fast_forward`   | Allow non-fast-forward pushes      | `true`, `false` (default: `false`)                 |
 
 ### Single-org mode
 

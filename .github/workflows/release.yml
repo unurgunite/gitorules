@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.2.0)"
+        required: true
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read shard.yml version
+        id: shard
+        run: echo "version=$(grep '^version:' shard.yml | awk '{print $2}')" >> $GITHUB_OUTPUT
+
+      - name: Verify version match
+        run: |
+          if [ "${{ steps.shard.outputs.version }}" != "${{ github.event.inputs.version }}" ]; then
+            echo "shard.yml version (${{ steps.shard.outputs.version }}) != input (${{ github.event.inputs.version }})"
+            exit 1
+          fi
+
+      - name: Set tag
+        id: tag
+        run: echo "tag=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: check-version
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: ""
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.14.0"
+
+      - name: Install dependencies
+        run: shards install
+
+      - name: Build
+        run: crystal build src/gitorules.cr --release -o gitorules${{ matrix.suffix }}
+
+      - name: Archive
+        run: tar czf gitorules-${{ matrix.target }}.tar.gz gitorules${{ matrix.suffix }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitorules-${{ matrix.target }}
+          path: gitorules-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s globstar
+          gh release create "${{ needs.check-version.outputs.tag }}" \
+            --title "${{ needs.check-version.outputs.tag }}" \
+            --generate-notes \
+            artifacts/**/*.tar.gz

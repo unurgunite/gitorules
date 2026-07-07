@@ -36,7 +36,7 @@ crystal spec
 
 ## Code conventions
 
-- Target Crystal 1.12+.
+- Target Crystal 1.14+.
 - Follow existing code style (Ameba enforces it).
 - YARD-style `@param` / `@return` documentation on all public methods.
 - No external runtime dependencies (stdlib only).
