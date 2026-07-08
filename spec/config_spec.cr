@@ -123,6 +123,58 @@ module Gitorules
         File.delete(path) if path && File.exists?(path)
       end
 
+      it "rejects config with two merge methods" do
+        config_yaml = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: only\n    squash: only\n"
+        path = File.join(Gitorules::TMP_DIR, "test_merge_conflict.yml")
+        File.write(path, config_yaml)
+        expect_raises(Exception, /conflicting/) do
+          ConfigLoader.new(path, token)
+        end
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
+      it "rejects config with three merge methods" do
+        config_yaml = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: only\n    squash: only\n    rebase: only\n"
+        path = File.join(Gitorules::TMP_DIR, "test_merge_conflict3.yml")
+        File.write(path, config_yaml)
+        expect_raises(Exception, /conflicting/) do
+          ConfigLoader.new(path, token)
+        end
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
+      it "accepts config with single merge method" do
+        config_yaml = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: only\n"
+        path = File.join(Gitorules::TMP_DIR, "test_merge_single.yml")
+        File.write(path, config_yaml)
+        loader = ConfigLoader.new(path, token)
+        loader.config.rules.should_not be_nil
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
+      it "rejects multi-org config with conflicting merge methods" do
+        config_yaml = <<-YAML
+          orgs:
+            unurgunite:
+              repos:
+                - docscribe
+              rules:
+                default_branch:
+                  merge: only
+                  squash: only
+          YAML
+        path = File.join(Gitorules::TMP_DIR, "test_merge_conflict_multi.yml")
+        File.write(path, config_yaml)
+        expect_raises(Exception, /conflicting/) do
+          ConfigLoader.new(path, token)
+        end
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
       it "validates multi-org rules" do
         config_yaml = <<-YAML
           orgs:
