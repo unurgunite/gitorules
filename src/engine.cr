@@ -18,13 +18,24 @@ module Gitorules
     #
     # Shows each configured branch type as a column with merge method
     # and checks status. Colorized: green ✓ / red ✗ / yellow ✗.
+    # Per-repo errors are caught and reported — other repos continue.
     #
     # @param repos [Array(String)] Full repository names
     # @param io [IO] Output stream (default: STDOUT)
     def status(repos : Array(String), io : IO = STDOUT)
       types = @config.all_type_keys
       status_print_header(types, io)
-      repos.each { |repo| status_repo_line(repo, types, io) }
+      errors = 0
+      repos.each do |repo|
+        begin
+          status_repo_line(repo, types, io)
+        rescue ex
+          io.puts "#{repo}: Error: #{ex.message}"
+          errors += 1
+        end
+      end
+      n = repos.size
+      io.puts "Done: #{n} repos processed, #{errors} error(s)" if errors > 0
     end
 
     # Prints the status table header row and separator.
@@ -197,13 +208,22 @@ module Gitorules
     #
     # For each repository: loads current rulesets, compares with desired
     # from config, and prints changes without applying them.
+    # Per-repo errors are caught and reported — other repos continue.
     #
     # @param repos [Array(String)] Full repository names
     # @param io [IO] Output stream (default: STDOUT)
     def diff(repos : Array(String), io : IO = STDOUT)
+      errors = 0
       repos.each do |repo|
-        diff_repo(repo, io)
+        begin
+          diff_repo(repo, io)
+        rescue ex
+          io.puts "#{repo}: Error: #{ex.message}"
+          errors += 1
+        end
       end
+      n = repos.size
+      io.puts "Done: #{n} repos processed, #{errors} error(s)" if errors > 0
     end
 
     # Outputs diff as JSON array.
@@ -211,10 +231,19 @@ module Gitorules
     # @param repos [Array(String)] Full repository names
     # @param io [IO] Output stream (default: STDOUT)
     def diff_json(repos : Array(String), io : IO = STDOUT)
+      errors = 0
       io.puts(JSON.build do |json|
         json.array do
           repos.each do |repo|
-            diff_json_repo(json, repo)
+            begin
+              diff_json_repo(json, repo)
+            rescue ex
+              json.object do
+                json.field "repo", repo
+                json.field "error", ex.message
+              end
+              errors += 1
+            end
           end
         end
       end)
@@ -496,13 +525,18 @@ module Gitorules
     #
     # Creates or updates rulesets for ALL configured branch types.
     # In dry-run mode prints intended actions without API calls.
+    # Per-repo errors are caught and reported — other repos continue.
     #
     # @param repos [Array(String)] Full repository names
     # @param dry_run [Bool] Preview only (default: false)
     # @param io [IO] Output stream (default: STDOUT)
     def apply(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT)
       repos.each do |repo|
-        apply_repo(repo, dry_run, io)
+        begin
+          apply_repo(repo, dry_run, io)
+        rescue ex
+          io.puts "#{repo}: Error: #{ex.message}"
+        end
       end
     end
 
@@ -512,10 +546,19 @@ module Gitorules
     # @param dry_run [Bool] Preview only (default: false)
     # @param io [IO] Output stream (default: STDOUT)
     def apply_json(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT)
+      errors = 0
       io.puts(JSON.build do |json|
         json.array do
           repos.each do |repo|
-            apply_json_repo(json, repo, dry_run)
+            begin
+              apply_json_repo(json, repo, dry_run)
+            rescue ex
+              json.object do
+                json.field "repo", repo
+                json.field "error", ex.message
+              end
+              errors += 1
+            end
           end
         end
       end)
