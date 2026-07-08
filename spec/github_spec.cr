@@ -109,12 +109,23 @@ module Gitorules
         end
       end
 
-      it "raises on 422" do
+      it "raises on 422 with short body" do
         WebMock.reset
         WebMock.stub(:post, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
           .to_return(status: 422, body: "name is missing")
 
-        expect_raises(Exception, "Validation error") do
+        expect_raises(Exception, "HTTP 422: name is missing") do
+          client.create_ruleset(REPO, Ruleset.new(""))
+        end
+      end
+
+      it "truncates long 422 body to 200 characters" do
+        long_body = "x" * 250
+        WebMock.reset
+        WebMock.stub(:post, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(status: 422, body: long_body)
+
+        expect_raises(Exception, /^HTTP 422: x{200}\.\.\. \(truncated\)$/) do
           client.create_ruleset(REPO, Ruleset.new(""))
         end
       end
