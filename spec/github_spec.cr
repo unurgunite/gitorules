@@ -17,6 +17,13 @@ module Gitorules
           ]
           JSON
 
+        # Verify JSON parsing works independently (no HTTP)
+        parsed = Array(Ruleset).from_json(body)
+        parsed.size.should eq 2
+        parsed[0].name.should eq "master"
+        parsed[1].name.should eq "release"
+
+        WebMock.reset
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
           .to_return(body: body, headers: {"Content-Type" => "application/json"})
 
@@ -178,6 +185,12 @@ module Gitorules
         app_client = GitHubClient.new(app_id, test_private_key, installation_id)
         result = app_client.list_rulesets("unurgunite/docscribe")
         result.should be_a(Array(Ruleset))
+      end
+
+      it "raises on invalid private key with meaningful message" do
+        expect_raises(Exception, "JWT signing failed") do
+          GitHubClient.new(app_id, "not-a-valid-key", installation_id)
+        end
       end
     end
   end

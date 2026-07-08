@@ -24,7 +24,7 @@ module Gitorules
       end
 
       it "returns 1 when config file not found" do
-        status = CLI.run(["--token", "test", "--config", "/tmp/nonexistent.yml"])
+        status = CLI.run(["--token", "test", "--config", File.join(Dir.tempdir, "nonexistent.yml")])
         status.should eq(1)
       end
     end

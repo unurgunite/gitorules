@@ -1,6 +1,7 @@
 require "./spec_helper"
 
 module Gitorules
+  STRIP_ANSI = ->(str : String) { str.gsub(/\e\[[0-9;]*m/, "") }
   describe Engine do
     token = "test-token"
     repo = "unurgunite/docscribe"
@@ -27,7 +28,7 @@ module Gitorules
 
         io = IO::Memory.new
         engine.status([repo], io)
-        io.to_s.should contain("✓ merge +checks")
+        STRIP_ANSI.call(io.to_s).should contain("✓ merge +checks")
       end
 
       it "warns for missing checks" do
@@ -42,7 +43,7 @@ module Gitorules
 
         io = IO::Memory.new
         engine.status([repo], io)
-        io.to_s.should contain("✓ merge -checks")
+        STRIP_ANSI.call(io.to_s).should contain("✓ merge -checks")
       end
 
       it "handles API errors gracefully" do
@@ -67,7 +68,7 @@ module Gitorules
 
         io = IO::Memory.new
         engine.status([repo], io)
-        io.to_s.should contain("✓ merge ~checks")
+        STRIP_ANSI.call(io.to_s).should contain("✓ merge ~checks")
       end
 
       it "shows ✗ method mismatch" do
