@@ -164,6 +164,8 @@ struct Options
   property? json : Bool = false
   # Suppress all output except errors.
   property? quiet : Bool = false
+  # Skip confirmation prompt (apply mode).
+  property? yes : Bool = false
   # GitHub personal access token.
   property token : String? = nil
   # GitHub App ID (for GitHub App auth).

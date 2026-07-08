@@ -94,6 +94,7 @@ gitorules <status|apply|diff|init> [options]
 | `--org ORG`               | GitHub organization name (for `init`)           |
 | `--json`                  | Machine-readable JSON output                    |
 | `--quiet`                 | Suppress all output except errors               |
+| `--yes`                   | Skip confirmation prompt and apply immediately  |
 | `--token TOKEN`           | GitHub personal access token                    |
 | `--app-id ID`             | GitHub App ID (for GitHub App auth)             |
 | `--private-key PEM`       | GitHub App private key (PEM content)            |
@@ -103,10 +104,16 @@ gitorules <status|apply|diff|init> [options]
 | `--version`               | Show version                                    |
 | `-h`, `--help`            | Show help                                       |
 
+**Apply confirmation:**
+
+Before applying changes, `gitorules apply` shows a diff and asks for confirmation. Use `--yes` to skip the prompt in
+scripts/automation.
+
 ### Exit codes
 
 - **0** — all rulesets are up to date (no changes needed)
-- **1** — changes detected (in status/diff mode) or changes applied (in apply mode)
+- **1** — changes detected (in `diff` mode) or changes were applied (in `apply` mode). Also returned when the
+  confirmation prompt is declined (changes exist but were skipped)
 - **2** — execution error (config error, API error, etc.)
 
 ### Authentication
