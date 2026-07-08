@@ -114,6 +114,23 @@ struct BranchRuleConfig
     end
   end
 
+  # Validates at most one merge method set to "only".
+  #
+  # Prints error to STDERR if multiple methods conflict.
+  # Returns true if valid, false on conflict.
+  @[YAML::Field(ignore: true)]
+  def validate_merge_methods! : Bool
+    conflicting = [] of String
+    conflicting << "merge" if merge == "only"
+    conflicting << "squash" if squash == "only"
+    conflicting << "rebase" if rebase == "only"
+    if conflicting.size > 1
+      STDERR.puts "Error: only one merge method allowed per rule (found #{conflicting.map { |f| "#{f}: only" }.join(" + ")})"
+      return false
+    end
+    true
+  end
+
   # Resolves the effective merge method from config shorthand.
   #
   # Returns one of `"merge"`, `"squash"`, `"rebase"`, or `nil` if none set.
