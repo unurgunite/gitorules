@@ -218,11 +218,27 @@ module Gitorules
       resp.body
     end
 
+    # Truncates 422 error body to 200 characters.
+    #
+    # Long bodies (>200 chars) get truncated with "(truncated)" suffix.
+    # Other status codes return full body with HTTP prefix.
+    #
+    # @param resp [HTTP::Client::Response] Raw API response
+    # @return [String] Formatted error message
+    private def format_error(resp : HTTP::Client::Response) : String
+      if resp.status_code == 422 && resp.body.size > 200
+        "HTTP 422: #{resp.body[0, 200]}... (truncated)"
+      elsif resp.status_code == 422
+        "HTTP 422: #{resp.body}"
+      else
+        "HTTP #{resp.status_code}: #{resp.body}"
+      end
+    end
+
     # Checks API response status and raises on errors.
     #
     # Success codes (200-299) pass through silently.
-    # 404 raises "Not found", 422 raises with server error body,
-    # all other codes raise with status code and body.
+    # 404 raises "Not found", all other codes raise with formatted error.
     #
     # @param resp [HTTP::Client::Response] Raw API response
     # @raise [RuntimeError] On 4xx or 5xx status code
@@ -232,10 +248,8 @@ module Gitorules
         return
       when 404
         raise "Not found"
-      when 422
-        raise "Validation error: #{resp.body}"
       else
-        raise "HTTP #{resp.status_code}: #{resp.body}"
+        raise format_error(resp)
       end
     end
   end
