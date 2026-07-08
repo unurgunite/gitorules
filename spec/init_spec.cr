@@ -74,6 +74,36 @@ module Gitorules
         output.should_not contain("rules:")
       end
 
+      it "logs warning to STDERR when get_ruleset fails" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 99, "name": "broken", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/99")
+          .to_return(status: 500)
+
+        client = GitHubClient.new(token)
+        generator = ConfigGenerator.new(client)
+        io = IO::Memory.new
+        generator.generate([repo], io)
+        output = io.to_s
+
+        output.should contain("WARNING: 1 ruleset(s) skipped")
+      end
+
+      it "includes skipped count in YAML comment when errors occur" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 99, "name": "broken", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/99")
+          .to_return(status: 500)
+
+        client = GitHubClient.new(token)
+        generator = ConfigGenerator.new(client)
+        io = IO::Memory.new
+        generator.generate([repo], io)
+        output = io.to_s
+
+        output.should contain("# WARNING: 1 ruleset(s) skipped")
+      end
+
       it "handles repo with empty rulesets" do
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
           .to_return(body: "[]")

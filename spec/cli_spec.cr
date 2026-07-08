@@ -20,7 +20,15 @@ module Gitorules
       end
 
       it "returns 2 when config file not found" do
-        CLI.run(["--token", "test", "--config", File.join(Dir.tempdir, "nonexistent.yml")]).should eq(2)
+        CLI.run(["--token", "test", "--config", File.join(Dir.tempdir, "nonexistent.yml"), "status"]).should eq(2)
+      end
+
+      it "prints help and exits 0 when no command given" do
+        CLI.run([] of String).should eq(0)
+      end
+
+      it "prints help and exits 0 with --token but no command" do
+        CLI.run(["--token", "test"]).should eq(0)
       end
     end
 
@@ -120,6 +128,30 @@ module Gitorules
           .to_return(body: "[]")
 
         CLI.run(["--token", "test", "--config", config_path, "apply", "--repo", repo, "--dry-run", "--yes"]).should eq(1)
+      end
+
+      it "warns about --dry-run ignored with status" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/test-repo/rulesets")
+          .to_return(body: "[]")
+
+        IO::Memory.new
+        status = CLI.run(["--token", "test", "--config", config_path, "status", "--repo", repo, "--dry-run"])
+        status.should eq(0)
+      end
+
+      it "warns about --diff ignored with diff" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/test-repo/rulesets")
+          .to_return(body: %([{"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/test-repo/rulesets/1")
+          .to_return(body: %({"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "check / check"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        status = CLI.run(["--token", "test", "--config", config_path, "diff", "--repo", repo, "--diff"])
+        status.should eq(0)
       end
     end
   end
