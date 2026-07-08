@@ -17,7 +17,8 @@ module Gitorules
     #
     # @param repos [Array(String)] Full repo names (org/name)
     # @param io [IO] Output stream (default: STDOUT)
-    def generate(repos : Array(String), io : IO = STDOUT)
+    # @param err [IO] Error stream (default: STDERR)
+    def generate(repos : Array(String), io : IO = STDOUT, err : IO = STDERR)
       config = Config.new
       org = extract_org(repos)
       config.org = org if org
@@ -36,7 +37,7 @@ module Gitorules
         rulesets = begin
           @client.list_rulesets(repo)
         rescue ex
-          STDERR.puts "Warning: #{repo}: #{ex.message}"
+          err.puts "Warning: #{repo}: #{format_http_error(ex)}"
           skipped += 1
           next
         end
@@ -47,7 +48,7 @@ module Gitorules
           full = begin
             @client.get_ruleset(repo, id)
           rescue ex
-            STDERR.puts "Warning: could not fetch ruleset '#{rs.name}' in #{repo}: #{ex.message}"
+            err.puts "Warning: could not fetch ruleset '#{rs.name}' in #{repo}: #{format_http_error(ex)}"
             skipped += 1
             next
           end
@@ -64,7 +65,7 @@ module Gitorules
       end
 
       if skipped > 0
-        STDERR.puts "Warning: #{skipped} ruleset(s) were skipped due to errors"
+        err.puts "Warning: #{skipped} ruleset(s) were skipped due to errors"
       end
 
       config.rules = all_rules unless all_rules.empty?
@@ -207,6 +208,14 @@ module Gitorules
     private def extract_org(repos : Array(String)) : String?
       parts = repos.first?.to_s.split("/")
       parts.size > 1 ? parts.first : nil
+    end
+
+    private def format_http_error(ex : Exception) : String
+      case ex.message
+      when "Not found"   then "404 Not Found"
+      when /^HTTP (\d+)/ then "HTTP #{$1}"
+      else                    ex.message.to_s
+      end
     end
   end
 end
