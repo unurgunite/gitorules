@@ -26,16 +26,17 @@ module Gitorules
       types = @config.all_type_keys
       status_print_header(types, io)
       errors = 0
-      repos.each do |repo|
+      repos.each_with_index do |repo, i|
+        prefix = "[#{i + 1}/#{repos.size}] "
         begin
-          status_repo_line(repo, types, io)
+          status_repo_line(repo, types, io, prefix)
         rescue ex
-          io.puts "#{repo}: Error: #{ex.message}"
+          io.puts "#{prefix}#{repo}: Error: #{ex.message}"
           errors += 1
         end
       end
       n = repos.size
-      io.puts "Done: #{n} repos processed, #{errors} error(s)" if errors > 0
+      io.puts "Done: #{n} repos processed, #{errors} error(s)"
     end
 
     # Prints the status table header row and separator.
@@ -57,7 +58,7 @@ module Gitorules
     # @param repo [String] Full repository name (owner/name)
     # @param types [Array(String)] Configured branch type keys
     # @param io [IO] Output stream
-    private def status_repo_line(repo : String, types : Array(String), io : IO)
+    private def status_repo_line(repo : String, types : Array(String), io : IO, prefix : String = "")
       results = {} of String => String
       rules = @config.rules_for(repo)
 
@@ -65,13 +66,13 @@ module Gitorules
         rulesets = @client.list_rulesets(repo)
         types.each { |type| results[type] = status_type_result(repo, rulesets, type, rules) }
       rescue ex
-        io.puts "%s  Error: %s" % [repo, ex.message]
+        io.puts "#{prefix}#{repo}: Error: #{ex.message}"
         return
       end
 
       line = pad_to(repo, 40) + " "
       types.each { |t| line += pad_to(results.fetch(t, "✗ MISSING".colorize.red.to_s), 24) + " " }
-      io.puts line
+      io.puts "#{prefix}#{line}"
     end
 
     # Computes the status string for a single branch type in a repo.
@@ -213,17 +214,15 @@ module Gitorules
     # @param repos [Array(String)] Full repository names
     # @param io [IO] Output stream (default: STDOUT)
     def diff(repos : Array(String), io : IO = STDOUT)
-      errors = 0
-      repos.each do |repo|
+      repos.each_with_index do |repo, i|
+        prefix = "[#{i + 1}/#{repos.size}] "
         begin
-          diff_repo(repo, io)
+          diff_repo(repo, io, prefix)
         rescue ex
-          io.puts "#{repo}: Error: #{ex.message}"
-          errors += 1
+          io.puts "#{prefix}#{repo}: Error: #{ex.message}"
         end
       end
-      n = repos.size
-      io.puts "Done: #{n} repos processed, #{errors} error(s)" if errors > 0
+      io.puts "Done: #{repos.size} repos processed"
     end
 
     # Outputs diff as JSON array.
@@ -366,15 +365,15 @@ module Gitorules
     #
     # @param repo [String] Full repository name (owner/name)
     # @param io [IO] Output stream
-    private def diff_repo(repo : String, io : IO)
+    private def diff_repo(repo : String, io : IO, prefix : String = "")
       begin
         existing = @client.list_rulesets(repo)
       rescue ex
-        io.puts "#{repo}: Error: #{ex.message}"
+        io.puts "#{prefix}#{repo}: Error: #{ex.message}"
         return
       end
 
-      io.puts "=== #{repo} ==="
+      io.puts "#{prefix}=== #{repo} ==="
 
       matched = Set(String).new
 
@@ -531,13 +530,18 @@ module Gitorules
     # @param dry_run [Bool] Preview only (default: false)
     # @param io [IO] Output stream (default: STDOUT)
     def apply(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT)
-      repos.each do |repo|
+      errors = 0
+      repos.each_with_index do |repo, i|
+        prefix = "[#{i + 1}/#{repos.size}] "
         begin
-          apply_repo(repo, dry_run, io)
+          apply_repo(repo, dry_run, io, prefix)
         rescue ex
-          io.puts "#{repo}: Error: #{ex.message}"
+          io.puts "#{prefix}#{repo}: Error: #{ex.message}"
+          errors += 1
         end
       end
+      n = repos.size
+      io.puts "Done: #{n} repos processed, #{errors} error(s)"
     end
 
     # Outputs apply result as JSON array.
@@ -619,7 +623,7 @@ module Gitorules
     # @param repo [String] Full repository name (owner/name)
     # @param dry_run [Bool] Preview only without API mutations
     # @param io [IO] Output stream
-    private def apply_repo(repo : String, dry_run : Bool, io : IO)
+    private def apply_repo(repo : String, dry_run : Bool, io : IO, prefix : String = "")
       existing = @client.list_rulesets(repo)
 
       if repo_rules = @config.rules_for(repo)
@@ -627,7 +631,7 @@ module Gitorules
           wanted = build_type_ruleset(type, config)
           names = type_match_names(type, config)
           found = existing.find(&.name.in?(names))
-          apply_ruleset(repo, found, wanted, dry_run, io)
+          apply_ruleset(repo, found, wanted, dry_run, io, prefix)
         end
       end
     end
@@ -795,22 +799,22 @@ module Gitorules
     # @param wanted [Ruleset] Desired ruleset configuration
     # @param dry_run [Bool] Preview only without API mutations
     # @param io [IO] Output stream
-    private def apply_ruleset(repo : String, existing : Ruleset?, wanted : Ruleset, dry_run : Bool, io : IO)
+    private def apply_ruleset(repo : String, existing : Ruleset?, wanted : Ruleset, dry_run : Bool, io : IO, prefix : String = "")
       if dry_run
         if existing && existing.id
-          io.puts "#{repo}: Would update ruleset '#{wanted.name}' (ID #{existing.id})"
+          io.puts "#{prefix}#{repo}: Would update ruleset '#{wanted.name}' (ID #{existing.id})"
         else
-          io.puts "#{repo}: Would create ruleset '#{wanted.name}'"
+          io.puts "#{prefix}#{repo}: Would create ruleset '#{wanted.name}'"
         end
         return
       end
 
       if existing && (id = existing.id)
         @client.update_ruleset(repo, id, wanted)
-        io.puts "#{repo}: Updated ruleset '#{wanted.name}'"
+        io.puts "#{prefix}#{repo}: Updated ruleset '#{wanted.name}'"
       else
         @client.create_ruleset(repo, wanted)
-        io.puts "#{repo}: Created ruleset '#{wanted.name}'"
+        io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}'"
       end
     end
 
