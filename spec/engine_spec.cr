@@ -120,6 +120,18 @@ module Gitorules
         WebMock.reset
       end
 
+      it "continues with other repos when one fails" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/unknown/rulesets")
+          .to_return(status: 500)
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        io = IO::Memory.new
+        engine.diff(["unurgunite/unknown", repo], io)
+        io.to_s.should contain("unurgunite/unknown: Error:")
+        io.to_s.should contain("+ Create")
+      end
+
       it "shows create for missing rulesets" do
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
           .to_return(body: "[]")
@@ -199,6 +211,20 @@ module Gitorules
     describe "#apply" do
       before_each do
         WebMock.reset
+      end
+
+      it "continues with other repos when one fails" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/unknown/rulesets")
+          .to_return(status: 500)
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+        WebMock.stub(:post, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %({"id": 1, "name": "test", "enforcement": "active", "target": "branch", "rules": []}))
+
+        io = IO::Memory.new
+        engine.apply(["unurgunite/unknown", repo], dry_run: false, io: io)
+        io.to_s.should contain("unurgunite/unknown: Error:")
+        io.to_s.should contain("Created ruleset 'master'")
       end
 
       it "creates both master and release rulesets" do
@@ -382,6 +408,19 @@ module Gitorules
         json = JSON.parse(io.to_s).as_a
         json[0]["error"].to_s.should contain("Not found")
       end
+
+      it "continues with other repos when one fails" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/unknown/rulesets")
+          .to_return(status: 500)
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        io = IO::Memory.new
+        engine.diff_json(["unurgunite/unknown", repo], io)
+        json = JSON.parse(io.to_s).as_a
+        json[0]["error"].to_s.should contain("500")
+        json[1]["repo"].to_s.should eq(repo)
+      end
     end
 
     describe "#apply_json" do
@@ -440,6 +479,21 @@ module Gitorules
         engine.apply_json(["unurgunite/unknown"], io: io)
         json = JSON.parse(io.to_s).as_a
         json[0]["error"].to_s.should contain("Not found")
+      end
+
+      it "continues with other repos when one fails" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/unknown/rulesets")
+          .to_return(status: 500)
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+        WebMock.stub(:post, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %({"id": 1, "name": "test", "enforcement": "active", "target": "branch", "rules": []}))
+
+        io = IO::Memory.new
+        engine.apply_json(["unurgunite/unknown", repo], dry_run: false, io: io)
+        json = JSON.parse(io.to_s).as_a
+        json[0]["error"].to_s.should contain("500")
+        json[1]["repo"].to_s.should eq(repo)
       end
     end
 
