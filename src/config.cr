@@ -20,6 +20,27 @@ module Gitorules
       raw = File.read(path)
       @config = Config.from_yaml(raw)
       @token = token || ENV["GITHUB_TOKEN"]? || raise("GITHUB_TOKEN not set. Export GITHUB_TOKEN or pass --token")
+      validate_config!
+    end
+
+    # Validates all rules in config, collecting errors from each BranchRuleConfig.
+    #
+    # Iterates single-org rules and multi-org rules. Raises on first
+    # validation error, prints warnings to STDERR for unsupported fields.
+    #
+    # @raise [RuntimeError] If any rule has invalid values
+    private def validate_config!
+      if rules = @config.rules
+        rules.each { |name, rule| rule.validate!(name) }
+      end
+
+      if orgs = @config.orgs
+        orgs.each do |org_name, org_config|
+          if org_rules = org_config.rules
+            org_rules.each { |name, rule| rule.validate!("#{org_name}.#{name}") }
+          end
+        end
+      end
     end
 
     # Resolves full repository names from config.

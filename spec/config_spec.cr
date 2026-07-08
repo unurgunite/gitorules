@@ -57,6 +57,94 @@ module Gitorules
       end
     end
 
+    describe "validation" do
+      token = "test-token"
+
+      it "accepts valid config without error" do
+        config_yaml = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: only\n    checks: [\"c\"]\n  release:\n    squash: only\n"
+        path = File.join(Gitorules::TMP_DIR, "test_validate_ok.yml")
+        File.write(path, config_yaml)
+        loader = ConfigLoader.new(path, token)
+        loader.config.rules.should_not be_nil
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
+      it "rejects boolean merge method" do
+        config_yaml = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: true\n"
+        path = File.join(Gitorules::TMP_DIR, "test_validate_bool.yml")
+        File.write(path, config_yaml)
+        expect_raises(Exception, /expected .only. or nil/) do
+          ConfigLoader.new(path, token)
+        end
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
+      it "rejects invalid string merge method" do
+        config_yaml = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: \"nope\"\n"
+        path = File.join(Gitorules::TMP_DIR, "test_validate_str.yml")
+        File.write(path, config_yaml)
+        expect_raises(Exception, /expected .only. or nil/) do
+          ConfigLoader.new(path, token)
+        end
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
+      it "reports all invalid fields in one error" do
+        config_yaml = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: true\n    squash: 123\n"
+        path = File.join(Gitorules::TMP_DIR, "test_validate_multi.yml")
+        File.write(path, config_yaml)
+        expect_raises(Exception, /merge/) do
+          ConfigLoader.new(path, token)
+        end
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
+      it "accepts linear_history with warning (no error)" do
+        config_yaml = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: only\n    linear_history: true\n"
+        path = File.join(Gitorules::TMP_DIR, "test_validate_linear.yml")
+        File.write(path, config_yaml)
+        loader = ConfigLoader.new(path, token)
+        loader.config.rules.should_not be_nil
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
+      it "accepts delete_branch with warning (no error)" do
+        config_yaml = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: only\n    delete_branch: true\n"
+        path = File.join(Gitorules::TMP_DIR, "test_validate_delete.yml")
+        File.write(path, config_yaml)
+        loader = ConfigLoader.new(path, token)
+        loader.config.rules.should_not be_nil
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
+      it "validates multi-org rules" do
+        config_yaml = <<-YAML
+          orgs:
+            unurgunite:
+              repos:
+                - docscribe
+              rules:
+                default_branch:
+                  merge: only
+                release:
+                  squash: 42
+          YAML
+        path = File.join(Gitorules::TMP_DIR, "test_validate_multi.yml")
+        File.write(path, config_yaml)
+        expect_raises(Exception, /unurgunite.release.squash/) do
+          ConfigLoader.new(path, token)
+        end
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+    end
+
     describe "#repo_names" do
       it "returns explicit repos list" do
         config_yaml = "org: unurgunite\nrepos:\n  - docscribe\n  - genius-api\nrules:\n  default_branch:\n    merge: only\n"
