@@ -81,6 +81,39 @@ struct BranchRuleConfig
   # Auto-delete head branches after merge.
   property delete_branch : Bool?
 
+  # Validates configuration values and collects errors/warnings.
+  #
+  # Checks merge method fields for invalid values and warns about
+  # unsupported fields. Raises on invalid config, prints warnings
+  # to STDERR for unsupported features.
+  #
+  # @param type_name [String] Branch type name for error messages (e.g. "default_branch")
+  # @raise [RuntimeError] If merge/squash/rebase has invalid value
+  def validate!(type_name : String = "?") : Nil
+    errors = [] of String
+    warnings = [] of String
+
+    {% for field in ["merge", "squash", "rebase"] %}
+      unless (value = {{field.id}}) == "only" || value.nil?
+        errors << "rules.#{type_name}.#{ {{field}} }: expected \"only\" or nil, got #{value.inspect}"
+      end
+    {% end %}
+
+    if linear_history == true
+      warnings << "rules.#{type_name}.linear_history: field not yet implemented — ignoring"
+    end
+
+    if delete_branch == true
+      warnings << "rules.#{type_name}.delete_branch: field not yet implemented — ignoring"
+    end
+
+    warnings.each { |w| STDERR.puts "Warning: #{w}" }
+
+    unless errors.empty?
+      raise errors.join("\n")
+    end
+  end
+
   # Resolves the effective merge method from config shorthand.
   #
   # Returns one of `"merge"`, `"squash"`, `"rebase"`, or `nil` if none set.
