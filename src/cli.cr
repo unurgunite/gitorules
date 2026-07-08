@@ -44,8 +44,10 @@ module Gitorules
     private def self.execute(args : Array(String), input_io : IO = STDIN)
       options = Options.new
       config_path = ".gitorules.yml"
+      help_text = ""
 
       OptionParser.parse(args) do |parser|
+        help_text = parser.to_s
         parser.banner = "Usage: gitorules <status|apply|diff|init> [options]\n\nCommands:\n"
 
         parser.on("status", "Show ruleset status for repositories") do
@@ -132,6 +134,11 @@ module Gitorules
         end
       end
 
+      if options.mode.empty?
+        puts help_text
+        return 0
+      end
+
       client = build_client(options)
 
       # Handle init separately — no config needed
@@ -184,6 +191,13 @@ module Gitorules
     end
 
     private def self.execute_command(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO = STDIN) : Int32
+      if options.dry_run? && options.mode != "apply"
+        STDERR.puts "Warning: --dry-run has no effect on '#{options.mode}' command"
+      end
+      if options.diff? && options.mode != "apply"
+        STDERR.puts "Warning: --diff has no effect on '#{options.mode}' command"
+      end
+
       case options.mode
       when "status"
         cmd_status(engine, repos, options, io)

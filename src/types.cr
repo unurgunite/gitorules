@@ -185,8 +185,9 @@ end
 
 # CLI options passed via command-line flags.
 struct Options
-  # Operation mode: "status", "apply", "init".
-  property mode : String = "status"
+  # Operation mode: "status", "apply", "diff", "init".
+  # Empty string means no command was given — show help.
+  property mode : String = ""
   # Target specific repository (full name).
   property repo : String? = nil
   # Preview changes without applying.
