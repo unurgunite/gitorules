@@ -17,6 +17,13 @@ module Gitorules
           ]
           JSON
 
+        # Verify JSON parsing works independently (no HTTP)
+        parsed = Array(Ruleset).from_json(body)
+        parsed.size.should eq 2
+        parsed[0].name.should eq "master"
+        parsed[1].name.should eq "release"
+
+        WebMock.reset
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
           .to_return(body: body, headers: {"Content-Type" => "application/json"})
 
