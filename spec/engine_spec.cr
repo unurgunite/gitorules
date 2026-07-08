@@ -28,7 +28,10 @@ module Gitorules
 
         io = IO::Memory.new
         engine.status([repo], io)
-        STRIP_ANSI.call(io.to_s).should contain("✓ merge +checks")
+        output = STRIP_ANSI.call(io.to_s)
+        output.should contain("✓ merge +checks")
+        output.should contain("[1/1]")
+        output.should contain("Done: 1 repos processed, 0 error(s)")
       end
 
       it "warns for missing checks" do
@@ -53,6 +56,7 @@ module Gitorules
         io = IO::Memory.new
         engine.status(["unurgunite/unknown"], io)
         io.to_s.should contain("Not found")
+        io.to_s.should contain("[1/1]")
       end
 
       it "shows ~checks for wrong context" do
@@ -130,6 +134,9 @@ module Gitorules
         engine.diff(["unurgunite/unknown", repo], io)
         io.to_s.should contain("unurgunite/unknown: Error:")
         io.to_s.should contain("+ Create")
+        io.to_s.should contain("[1/2]")
+        io.to_s.should contain("[2/2]")
+        io.to_s.should contain("Done: 2 repos processed")
       end
 
       it "shows create for missing rulesets" do
@@ -141,6 +148,8 @@ module Gitorules
         io.to_s.should contain("+ Create")
         io.to_s.should contain("master")
         io.to_s.should contain("Release branches")
+        io.to_s.should contain("[1/1]")
+        io.to_s.should contain("Done: 1 repos processed")
       end
 
       it "shows no changes when rulesets match" do
@@ -186,6 +195,7 @@ module Gitorules
         io = IO::Memory.new
         engine.diff(["unurgunite/unknown"], io)
         io.to_s.should contain("Error: Not found")
+        io.to_s.should contain("[1/1]")
       end
 
       it "shows orphan rulesets" do
@@ -225,6 +235,9 @@ module Gitorules
         engine.apply(["unurgunite/unknown", repo], dry_run: false, io: io)
         io.to_s.should contain("unurgunite/unknown: Error:")
         io.to_s.should contain("Created ruleset 'master'")
+        io.to_s.should contain("[1/2]")
+        io.to_s.should contain("[2/2]")
+        io.to_s.should contain("Done: 2 repos processed, 1 error(s)")
       end
 
       it "creates both master and release rulesets" do
@@ -238,6 +251,8 @@ module Gitorules
         engine.apply([repo], dry_run: false, io: io)
         io.to_s.should contain("Created ruleset 'master'")
         io.to_s.should contain("Created ruleset 'Release branches — squash only'")
+        io.to_s.should contain("[1/1]")
+        io.to_s.should contain("Done: 1 repos processed, 0 error(s)")
       end
 
       it "updates existing rulesets" do
@@ -274,7 +289,8 @@ module Gitorules
 
         io = IO::Memory.new
         empty_engine.apply([repo], io: io)
-        io.to_s.should be_empty
+        io.to_s.should contain("Done: 1 repos processed, 0 error(s)")
+        io.to_s.should_not contain("Created ruleset")
       end
 
       it "uses pattern from config for release branch conditions" do
