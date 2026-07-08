@@ -167,8 +167,7 @@ module Gitorules
                 loader.repo_names
               end
 
-      io = options.quiet? ? IO::Memory.new : STDOUT
-      execute_command(engine, repos, options, io, input_io)
+      execute_command(engine, repos, options, STDOUT, input_io)
     end
 
     private def self.build_client(options : Options) : GitHubClient
@@ -215,7 +214,7 @@ module Gitorules
       if options.json?
         engine.status_json(repos, io)
       else
-        engine.status(repos, io)
+        engine.status(repos, quiet: options.quiet?, io: io)
       end
       0
     end
@@ -225,7 +224,7 @@ module Gitorules
         if options.json?
           engine.diff_json(repos, io)
         else
-          engine.diff(repos, io)
+          engine.diff(repos, io: io)
         end
         return 0
       end
@@ -236,7 +235,7 @@ module Gitorules
       end
 
       diff_io = IO::Memory.new
-      engine.diff(repos, diff_io)
+      engine.diff(repos, io: diff_io)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 
@@ -249,7 +248,7 @@ module Gitorules
           end
         end
 
-        engine.apply(repos, dry_run: options.dry_run?, io: io)
+        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, io: io)
         1
       else
         io.puts "no changes" unless options.quiet?
@@ -264,9 +263,9 @@ module Gitorules
       end
 
       diff_io = IO::Memory.new
-      engine.diff(repos, diff_io)
+      engine.diff(repos, io: diff_io)
       diff_text = diff_io.to_s
-      io.print diff_text
+      io.print diff_text unless options.quiet?
 
       diff_has_changes?(diff_text) ? 1 : 0
     end

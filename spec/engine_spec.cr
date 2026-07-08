@@ -27,11 +27,11 @@ module Gitorules
           ]}))
 
         io = IO::Memory.new
-        engine.status([repo], io)
+        engine.status([repo], io: io)
         output = STRIP_ANSI.call(io.to_s)
         output.should contain("✓ merge +checks")
         output.should contain("[1/1]")
-        output.should contain("Done: 1 repos processed, 0 error(s)")
+        output.should contain("All rulesets up to date")
       end
 
       it "warns for missing checks" do
@@ -45,18 +45,20 @@ module Gitorules
           ]}))
 
         io = IO::Memory.new
-        engine.status([repo], io)
+        engine.status([repo], io: io)
         STRIP_ANSI.call(io.to_s).should contain("✓ merge -checks")
       end
 
-      it "handles API errors gracefully" do
+      it "handles API errors gracefully with ERR row" do
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/unknown/rulesets")
           .to_return(status: 404)
 
         io = IO::Memory.new
-        engine.status(["unurgunite/unknown"], io)
-        io.to_s.should contain("Not found")
-        io.to_s.should contain("[1/1]")
+        engine.status(["unurgunite/unknown"], io: io)
+        output = io.to_s
+        output.should_not contain("Not found")
+        output.should contain("ERR")
+        output.should contain("[1/1]")
       end
 
       it "shows ~checks for wrong context" do
@@ -71,7 +73,7 @@ module Gitorules
           ]}))
 
         io = IO::Memory.new
-        engine.status([repo], io)
+        engine.status([repo], io: io)
         STRIP_ANSI.call(io.to_s).should contain("✓ merge ~checks")
       end
 
@@ -86,7 +88,7 @@ module Gitorules
           ]}))
 
         io = IO::Memory.new
-        engine.status([repo], io)
+        engine.status([repo], io: io)
         io.to_s.should contain("✗ squash")
       end
 
@@ -95,7 +97,7 @@ module Gitorules
           .to_return(body: %([{"id": 6, "name": "unrelated", "enforcement": "active", "target": "branch", "rules": []}]))
 
         io = IO::Memory.new
-        engine.status([repo], io)
+        engine.status([repo], io: io)
         io.to_s.should contain("✗ MISSING")
       end
 
@@ -113,9 +115,63 @@ module Gitorules
           ]}))
 
         io = IO::Memory.new
-        no_checks_engine.status([repo], io)
+        no_checks_engine.status([repo], io: io)
         io.to_s.should contain("✓ merge")
         io.to_s.should_not contain("checks")
+      end
+
+      it "quiet mode only shows summary line" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/1")
+          .to_return(body: %({"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "check / check"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        io = IO::Memory.new
+        engine.status([repo], quiet: true, io: io)
+        output = io.to_s
+        output.should contain("All rulesets up to date")
+        output.should_not contain("[1/1]")
+        output.should_not contain("✓")
+      end
+
+      it "quiet mode with API error shows up-to-date (error caught internally)" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/unknown/rulesets")
+          .to_return(status: 404)
+
+        io = IO::Memory.new
+        engine.status(["unurgunite/unknown"], quiet: true, io: io)
+        output = io.to_s
+        output.should contain("All rulesets up to date")
+        output.should_not contain("[1/1]")
+      end
+
+      it "error row has correct padding" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/unknown/rulesets")
+          .to_return(status: 404)
+
+        io = IO::Memory.new
+        engine.status(["unurgunite/unknown"], io: io)
+        output = STRIP_ANSI.call(io.to_s)
+        output.should match(/unknown\s+ERR\s+ERR/)
+      end
+
+      it "no ANSI codes in IO::Memory output" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/1")
+          .to_return(body: %({"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "check / check"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        io = IO::Memory.new
+        engine.status([repo], io: io)
+        io.to_s.should_not match(/\e\[/)
       end
     end
 
@@ -131,7 +187,7 @@ module Gitorules
           .to_return(body: "[]")
 
         io = IO::Memory.new
-        engine.diff(["unurgunite/unknown", repo], io)
+        engine.diff(["unurgunite/unknown", repo], io: io)
         io.to_s.should contain("unurgunite/unknown: Error:")
         io.to_s.should contain("+ Create")
         io.to_s.should contain("[1/2]")
@@ -144,7 +200,7 @@ module Gitorules
           .to_return(body: "[]")
 
         io = IO::Memory.new
-        engine.diff([repo], io)
+        engine.diff([repo], io: io)
         io.to_s.should contain("+ Create")
         io.to_s.should contain("master")
         io.to_s.should contain("Release branches")
@@ -165,12 +221,11 @@ module Gitorules
           ]}))
 
         io = IO::Memory.new
-        engine.diff([repo], io)
+        engine.diff([repo], io: io)
         io.to_s.should contain("no changes")
       end
 
       it "shows update when rules differ" do
-        # List has existing ruleset, but full fetch shows different params
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
           .to_return(body: %([{"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
 
@@ -183,7 +238,7 @@ module Gitorules
           ]}))
 
         io = IO::Memory.new
-        engine.diff([repo], io)
+        engine.diff([repo], io: io)
         io.to_s.should contain("~ Update")
         io.to_s.should contain("allowed_merge_methods")
       end
@@ -193,7 +248,7 @@ module Gitorules
           .to_return(status: 404)
 
         io = IO::Memory.new
-        engine.diff(["unurgunite/unknown"], io)
+        engine.diff(["unurgunite/unknown"], io: io)
         io.to_s.should contain("Error: Not found")
         io.to_s.should contain("[1/1]")
       end
@@ -211,10 +266,22 @@ module Gitorules
           ]}))
 
         io = IO::Memory.new
-        engine.diff([repo], io)
+        engine.diff([repo], io: io)
         io.to_s.should contain("no changes")
         io.to_s.should contain("Orphan")
         io.to_s.should contain("Deprecated")
+      end
+
+      it "quiet mode only shows summary line" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        io = IO::Memory.new
+        engine.diff([repo], quiet: true, io: io)
+        output = io.to_s
+        output.should contain("Done: 1 repos processed")
+        output.should_not contain("[1/1]")
+        output.should_not contain("+ Create")
       end
     end
 
@@ -306,6 +373,18 @@ module Gitorules
         io = IO::Memory.new
         custom_engine.apply([repo], io: io)
         io.to_s.should contain("Created ruleset 'Release branches — squash only'")
+      end
+
+      it "quiet mode only shows summary line" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/unknown/rulesets")
+          .to_return(status: 500)
+
+        io = IO::Memory.new
+        engine.apply(["unurgunite/unknown"], quiet: true, io: io)
+        output = io.to_s
+        output.should contain("Done: 1 repos processed, 1 error(s)")
+        output.should_not contain("[1/1]")
+        output.should_not contain("Error:")
       end
     end
 
@@ -549,7 +628,7 @@ module Gitorules
           ]}))
 
         io = IO::Memory.new
-        multi_engine.status(["unurgunite/docscribe", "fintech/payment-api"], io)
+        multi_engine.status(["unurgunite/docscribe", "fintech/payment-api"], io: io)
         output = io.to_s
         output.should contain("default")
         output.should contain("release")
@@ -563,7 +642,7 @@ module Gitorules
           .to_return(body: "[]")
 
         io = IO::Memory.new
-        multi_engine.diff(["unurgunite/docscribe", "fintech/payment-api"], io)
+        multi_engine.diff(["unurgunite/docscribe", "fintech/payment-api"], io: io)
         output = io.to_s
         output.scan(/\+ Create/).size.should eq(3) # 2 for unurgunite + 1 for fintech
       end
