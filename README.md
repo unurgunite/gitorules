@@ -22,6 +22,7 @@ Manage branch protection rules across all your repositories from a single YAML c
 * [Configuration: `.gitorules.yml`](#configuration-gitorulesyml)
     * [File structure](#file-structure)
     * [Multi-org mode](#multi-org-mode)
+    * [Rule types](#rule-types)
     * [Single-org mode](#single-org-mode)
     * [Branch types](#branch-types)
     * [Branch type options](#branch-type-options)
@@ -86,23 +87,19 @@ gitorules <status|apply|diff|init> [options]
 
 ### Options
 
-| Flag                      | Description                                     |
-|---------------------------|-------------------------------------------------|
-| `--dry-run`               | Preview apply changes without making them       |
-| `--diff`                  | Show pending changes (same as `diff` command)   |
-| `--repo REPO`             | Target a single repository (`owner/name`)       |
-| `--org ORG`               | GitHub organization name (for `init`)           |
-| `--json`                  | Machine-readable JSON output                    |
-| `--quiet`                 | Suppress all output except errors               |
-| `--yes`                   | Skip confirmation prompt and apply immediately  |
-| `--token TOKEN`           | GitHub personal access token                    |
-| `--app-id ID`             | GitHub App ID (for GitHub App auth)             |
-| `--private-key PEM`       | GitHub App private key (PEM content)            |
-| `--private-key-path PATH` | Path to GitHub App private key PEM file         |
-| `--installation-id ID`    | GitHub App installation ID                      |
-| `--config PATH`           | Path to config file (default: `.gitorules.yml`) |
-| `--version`               | Show version                                    |
-| `-h`, `--help`            | Show help                                       |
+| Flag            | Description                                     |
+|-----------------|-------------------------------------------------|
+| `--dry-run`     | Preview apply changes without making them       |
+| `--diff`        | Show pending changes (same as `diff` command)   |
+| `--repo REPO`   | Target a single repository (`owner/name`)       |
+| `--org ORG`     | GitHub organization name (for `init`)           |
+| `--json`        | Machine-readable JSON output                    |
+| `--quiet`       | Suppress all output except errors               |
+| `--yes`         | Skip confirmation prompt and apply immediately  |
+| `--token TOKEN` | GitHub personal access token                    |
+| `--config PATH` | Path to config file (default: `.gitorules.yml`) |
+| `--version`     | Show version                                    |
+| `-h`, `--help`  | Show help                                       |
 
 **Apply confirmation:**
 
@@ -118,9 +115,7 @@ scripts/automation.
 
 ### Authentication
 
-gitorules supports two authentication methods:
-
-**Personal Access Token:**
+Use a Personal Access Token with `repo` and `read:org` scopes:
 
 ```shell
 gitorules --token ghp_xxx status
@@ -128,15 +123,7 @@ gitorules --token ghp_xxx status
 
 Or set `GITHUB_TOKEN` environment variable.
 
-**GitHub App (JWT):**
-
-```shell
-gitorules --app-id 123456 --private-key-path ./key.pem --installation-id 789012 status
-```
-
-Environment variables: `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID`.
-
-If no auth method is configured, gitorules prints an error and exits with code 2.
+If no token is configured, gitorules prints an error and exits with code 2.
 
 ## Configuration: `.gitorules.yml`
 
