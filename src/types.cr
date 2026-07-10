@@ -114,6 +114,30 @@ struct BranchRuleConfig
     end
   end
 
+  # Returns true if any check contains glob characters (*, ?, [)
+  @[YAML::Field(ignore: true)]
+  def glob_checks? : Bool
+    checks.try &.any? { |c| c.includes?('*') || c.includes?('?') || c.includes?('[') } || false
+  end
+
+  # Checks if actual check contexts match expected patterns (supports glob).
+  # Each expected pattern must match at least one actual check.
+  # Exact patterns use direct equality, glob patterns use File.match?.
+  @[YAML::Field(ignore: true)]
+  def checks_match?(actual : Array(String)) : Bool
+    expected = self.checks
+    return false unless expected
+    return false if actual.empty?
+
+    expected.all? do |pattern|
+      if pattern.includes?('*') || pattern.includes?('?') || pattern.includes?('[')
+        actual.any? { |c| File.match?(pattern, c) }
+      else
+        actual.includes?(pattern)
+      end
+    end
+  end
+
   # Validates at most one merge method set to "only".
   #
   # Prints error to STDERR if multiple methods conflict.
