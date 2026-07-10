@@ -526,9 +526,7 @@ module Gitorules
           json.field "name", wanted.name
           json.field "dry_run", true if dry_run
           json.field "id", existing.id if existing && existing.id
-          if action == "create" && config.glob_checks?
-            json.field "checks_skipped", true
-          end
+          json_apply_checks_skipped(json, action, config)
         end
         return
       end
@@ -537,6 +535,12 @@ module Gitorules
         json.field "action", "update"
         json.field "name", wanted.name
         json.field "id", existing.id
+      end
+    end
+
+    private def json_apply_checks_skipped(json : JSON::Builder, action : String, config : BranchRuleConfig)
+      if action == "create" && config.glob_checks?
+        json.field "checks_skipped", true
       end
     end
 
