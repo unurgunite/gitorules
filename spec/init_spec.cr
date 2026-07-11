@@ -74,6 +74,36 @@ module Gitorules
         output.should_not contain("rules:")
       end
 
+      it "logs warning to STDERR when get_ruleset fails" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 99, "name": "broken", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/99")
+          .to_return(status: 500)
+
+        client = GitHubClient.new(token)
+        generator = ConfigGenerator.new(client)
+        io = IO::Memory.new
+        generator.generate([repo], io)
+        output = io.to_s
+
+        output.should contain("WARNING: 1 ruleset(s) skipped")
+      end
+
+      it "includes skipped count in YAML comment when errors occur" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 99, "name": "broken", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/99")
+          .to_return(status: 500)
+
+        client = GitHubClient.new(token)
+        generator = ConfigGenerator.new(client)
+        io = IO::Memory.new
+        generator.generate([repo], io)
+        output = io.to_s
+
+        output.should contain("# WARNING: 1 ruleset(s) skipped")
+      end
+
       it "handles repo with empty rulesets" do
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
           .to_return(body: "[]")
@@ -86,6 +116,55 @@ module Gitorules
 
         output.should contain("org: unurgunite")
         output.should_not contain("rules:")
+      end
+
+      it "warns to STDERR with repo/ruleset name on 404 for get_ruleset" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 99, "name": "broken", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/99")
+          .to_return(status: 404)
+
+        client = GitHubClient.new(token)
+        generator = ConfigGenerator.new(client)
+        io = IO::Memory.new
+        err = IO::Memory.new
+        generator.generate([repo], io, err: err)
+        err.to_s.should contain("unurgunite/docscribe")
+        err.to_s.should contain("broken")
+        err.to_s.should contain("404")
+      end
+
+      it "final warning shows count when multiple rulesets fail" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 1, "name": "a", "enforcement": "active", "target": "branch", "rules": []}, {"id": 2, "name": "b", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/1")
+          .to_return(status: 500)
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/2")
+          .to_return(status: 500)
+
+        client = GitHubClient.new(token)
+        generator = ConfigGenerator.new(client)
+        io = IO::Memory.new
+        err = IO::Memory.new
+        generator.generate([repo], io, err: err)
+        err.to_s.should contain("2 ruleset(s) were skipped")
+      end
+
+      it "no warning when all fetches succeed" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/1")
+          .to_return(body: %({"id": 1, "name": "master", "enforcement": "active", "target": "branch", "conditions": {"ref_name": {"include": ["refs/heads/master"], "exclude": []}}, "rules": [
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}}
+          ]}))
+
+        client = GitHubClient.new(token)
+        generator = ConfigGenerator.new(client)
+        io = IO::Memory.new
+        err = IO::Memory.new
+        generator.generate([repo], io, err: err)
+        err.to_s.strip.should be_empty
+        io.to_s.should_not contain("WARNING")
       end
 
       it "merges configs from multiple repos" do

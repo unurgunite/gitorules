@@ -6,11 +6,14 @@ module Gitorules
     #
     # Used inside OptionParser blocks where `return` is forbidden,
     # to abort normal flow and return an exit code to the caller.
+    #
+    # Exit codes:
+    #   0 - No changes needed (everything up-to-date)
+    #   1 - Changes detected or applied
+    #   2 - Error (config, auth, API failure)
     class ExitSignal < Exception
-      # Exit code (0 = success, 1 = error)
       getter code : Int32
 
-      # @param code [Int32] Exit code to return to the shell
       def initialize(@code : Int32)
       end
     end
@@ -21,9 +24,10 @@ module Gitorules
     # to the appropriate engine command. Returns a shell exit code.
     #
     # @param args [Array(String)] Command-line arguments (default: ARGV)
-    # @return [Int32] Exit code (0 = success, 1 = error)
-    def self.run(args : Array(String) = ARGV) : Int32
-      execute(args)
+    # @param input_io [IO] Input stream for prompts (default: STDIN)
+    # @return [Int32] Exit code (0 = no changes, 1 = changes detected/applied, 2 = error)
+    def self.run(args : Array(String) = ARGV, input_io : IO = STDIN) : Int32
+      execute(args, input_io)
     rescue ex : ExitSignal
       ex.code
     end
@@ -34,13 +38,16 @@ module Gitorules
     # blocks can be caught without affecting the normal return path.
     #
     # @param args [Array(String)] Command-line arguments
+    # @param input_io [IO] Input stream for prompts (default: STDIN)
     # @return [Int32] Exit code
     # @raise [ExitSignal] On --version, --help, or any error condition
-    private def self.execute(args : Array(String))
+    private def self.execute(args : Array(String), input_io : IO = STDIN)
       options = Options.new
       config_path = ".gitorules.yml"
+      help_text = ""
 
       OptionParser.parse(args) do |parser|
+        help_text = parser.to_s
         parser.banner = "Usage: gitorules <status|apply|diff|init> [options]\n\nCommands:\n"
 
         parser.on("status", "Show ruleset status for repositories") do
@@ -85,6 +92,10 @@ module Gitorules
           options.quiet = true
         end
 
+        parser.on("--yes", "Skip confirmation prompt and apply immediately") do
+          options.yes = true
+        end
+
         parser.on("--token TOKEN", "GitHub personal access token") do |v|
           options.token = v
         end
@@ -101,7 +112,7 @@ module Gitorules
           options.private_key = File.read(v)
         rescue ex
           STDERR.puts "Error reading private key: #{ex.message}"
-          raise ExitSignal.new(1)
+          raise ExitSignal.new(2)
         end
 
         parser.on("--installation-id ID", "GitHub App installation ID") do |v|
@@ -123,6 +134,11 @@ module Gitorules
         end
       end
 
+      if options.mode.empty?
+        puts help_text
+        return 0
+      end
+
       client = build_client(options)
 
       # Handle init separately — no config needed
@@ -133,14 +149,14 @@ module Gitorules
       token = client.token
       unless token
         STDERR.puts "Error: no auth token available"
-        raise ExitSignal.new(1)
+        raise ExitSignal.new(2)
       end
 
       begin
         loader = ConfigLoader.new(config_path, token)
       rescue ex
         STDERR.puts "Error loading config: #{ex.message}"
-        raise ExitSignal.new(1)
+        raise ExitSignal.new(2)
       end
 
       engine = Engine.new(client, loader.config)
@@ -151,9 +167,7 @@ module Gitorules
                 loader.repo_names
               end
 
-      io = options.quiet? ? IO::Memory.new : STDOUT
-      execute_command(engine, repos, options, io)
-      0
+      execute_command(engine, repos, options, STDOUT, input_io)
     end
 
     private def self.build_client(options : Options) : GitHubClient
@@ -171,39 +185,96 @@ module Gitorules
       end
 
       STDERR.puts "Error: no auth method configured. Use --token / GITHUB_TOKEN for PAT, or --app-id + --private-key + --installation-id / GITHUB_APP_* env for GitHub App"
-      raise ExitSignal.new(1)
+      STDERR.puts "Create a token: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"
+      raise ExitSignal.new(2)
     end
 
-    private def self.execute_command(engine : Engine, repos : Array(String), options : Options, io : IO) : Nil
+    private def self.execute_command(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO = STDIN) : Int32
+      if options.dry_run? && options.mode != "apply"
+        STDERR.puts "Warning: --dry-run has no effect on '#{options.mode}' command"
+      end
+      if options.diff? && options.mode != "apply"
+        STDERR.puts "Warning: --diff has no effect on '#{options.mode}' command"
+      end
+
       case options.mode
       when "status"
-        if options.json?
-          engine.status_json(repos, io)
-        else
-          engine.status(repos, io)
-        end
+        cmd_status(engine, repos, options, io)
       when "apply"
-        if options.diff?
-          if options.json?
-            engine.diff_json(repos, io)
-          else
-            engine.diff(repos, io)
-          end
-        elsif options.json?
-          engine.apply_json(repos, dry_run: options.dry_run?, io: io)
-        else
-          engine.apply(repos, dry_run: options.dry_run?, io: io)
-        end
+        cmd_apply(engine, repos, options, io, input_io)
       when "diff"
+        cmd_diff(engine, repos, options, io)
+      else
+        STDERR.puts "gitorules: unknown subcommand '#{options.mode}'"
+        2
+      end
+    end
+
+    private def self.cmd_status(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
+      if options.json?
+        engine.status_json(repos, io)
+      else
+        engine.status(repos, quiet: options.quiet?, io: io)
+      end
+      0
+    end
+
+    private def self.cmd_apply(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO) : Int32
+      if options.diff?
         if options.json?
           engine.diff_json(repos, io)
         else
-          engine.diff(repos, io)
+          engine.diff(repos, io: io)
         end
-      else
-        STDERR.puts "gitorules: unknown subcommand '#{options.mode}'"
-        raise ExitSignal.new(1)
+        return 0
       end
+
+      if options.json?
+        engine.apply_json(repos, dry_run: options.dry_run?, io: io)
+        return 0
+      end
+
+      diff_io = IO::Memory.new
+      engine.diff(repos, io: diff_io)
+      diff_text = diff_io.to_s
+      io.print diff_text unless options.quiet?
+
+      if diff_has_changes?(diff_text)
+        unless options.yes?
+          STDERR.print "Apply these changes? [y/N] "
+          answer = input_io.gets
+          unless answer && answer.strip.downcase == "y"
+            return 1
+          end
+        end
+
+        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, io: io)
+        1
+      else
+        io.puts "no changes" unless options.quiet?
+        0
+      end
+    end
+
+    private def self.cmd_diff(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
+      if options.json?
+        engine.diff_json(repos, io)
+        return 0
+      end
+
+      diff_io = IO::Memory.new
+      engine.diff(repos, io: diff_io)
+      diff_text = diff_io.to_s
+      io.print diff_text unless options.quiet?
+
+      diff_has_changes?(diff_text) ? 1 : 0
+    end
+
+    private def self.diff_has_changes?(diff_text : String) : Bool
+      diff_text.lines.any? { |line|
+        stripped = line.strip
+        stripped.starts_with?("+") || stripped.starts_with?("-") || stripped.starts_with?("~")
+      }
     end
 
     private def self.handle_init(options : Options, client : GitHubClient) : Int32
@@ -214,16 +285,16 @@ module Gitorules
                   client.list_repos(org).map { |name| "#{org}/#{name}" }
                 rescue ex
                   STDERR.puts "Error listing repositories for org '#{org}': #{ex.message}"
-                  raise ExitSignal.new(1)
+                  raise ExitSignal.new(2)
                 end
               else
                 STDERR.puts "Error: --repo or --org required for init"
-                raise ExitSignal.new(1)
+                raise ExitSignal.new(2)
               end
 
       if repos.empty?
         STDERR.puts "Error: no repositories found"
-        raise ExitSignal.new(1)
+        raise ExitSignal.new(2)
       end
 
       generator = ConfigGenerator.new(client)
