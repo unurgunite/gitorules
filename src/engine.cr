@@ -77,11 +77,12 @@ module Gitorules
       method = methods.first?.to_s
       method_ok = rule_config.try(&.merge_method) == method || !rule_config.try(&.merge_method)
       status = method_ok ? green("✓ #{method}", io) : red("✗ #{method}", io)
-      status = status.to_s + checks_status_label(full, rule_config.try(&.checks), io)
+      status = status.to_s + checks_status_label(full, rule_config, io)
       status.to_s
     end
 
-    private def checks_status_label(full : Ruleset, expected : Array(String)?, io : IO) : String
+    private def checks_status_label(full : Ruleset, config : BranchRuleConfig?, io : IO) : String
+      expected = config.try(&.checks)
       return "" unless expected
 
       checks_rule = full.rules.find { |r| r.type == "required_status_checks" }
@@ -91,7 +92,12 @@ module Gitorules
       actual = params["required_status_checks"]?.try(&.as_a).try { |a| a.map { |c| c.as_h["context"]?.try(&.to_s) } }
       return yellow(" -checks", io) unless actual
 
-      actual == expected ? green(" +checks", io) : yellow(" ~checks", io)
+      if config.try(&.glob_checks?) && (cfg = config)
+        actual_str = actual.compact
+        cfg.checks_match?(actual_str) ? green(" +checks", io) : yellow(" ~checks", io)
+      else
+        actual == expected ? green(" +checks", io) : yellow(" ~checks", io)
+      end
     end
 
     def status_json(repos : Array(String), io : IO = STDOUT)
@@ -162,7 +168,13 @@ module Gitorules
           checks_rule = full.rules.find { |r| r.type == "required_status_checks" }
           params = checks_rule.try(&.parameters)
           actual = params.try { |p| p["required_status_checks"]?.try(&.as_a).try { |a| a.map { |c| c.as_h["context"]?.try(&.to_s) } } }
-          json.field "checks_ok", actual == expected_checks
+          checks_ok = if rule_config.try(&.glob_checks?)
+                        actual_str = actual.try(&.compact) || [] of String
+                        rule_config.try(&.checks_match?(actual_str)) || false
+                      else
+                        actual == expected_checks
+                      end
+          json.field "checks_ok", checks_ok
         end
       end
     end
@@ -223,7 +235,7 @@ module Gitorules
                 matched << found.name if found
 
                 if found
-                  diff_json_update(json, repo, found, wanted)
+                  diff_json_update(json, repo, found, wanted, config)
                 else
                   diff_json_create(json, wanted)
                 end
@@ -254,7 +266,7 @@ module Gitorules
       end
     end
 
-    private def diff_json_update(json : JSON::Builder, repo : String, existing_rs : Ruleset, wanted : Ruleset)
+    private def diff_json_update(json : JSON::Builder, repo : String, existing_rs : Ruleset, wanted : Ruleset, config : BranchRuleConfig)
       id = existing_rs.id
       unless id
         diff_json_create(json, wanted)
@@ -274,7 +286,11 @@ module Gitorules
       wanted_rules = Set.new(wanted.rules.map(&.type))
 
       (wanted_rules - existing_rules).each { |r| changes << "+#{r}" }
-      (existing_rules - wanted_rules).each { |r| changes << "-#{r}" }
+      removed = existing_rules - wanted_rules
+      if config.glob_checks?
+        removed.delete("required_status_checks")
+      end
+      removed.each { |r| changes << "-#{r}" }
 
       wanted.rules.each do |wanted_rule|
         existing_rule = full.rules.find { |r| r.type == wanted_rule.type }
@@ -290,6 +306,10 @@ module Gitorules
             changes << "#{key}: #{existing_val} → #{wanted_val}"
           end
         end
+      end
+
+      if config.glob_checks? && full.rules.any? { |r| r.type == "required_status_checks" }
+        changes << "required_status_checks (matched by glob pattern)"
       end
 
       json.object do
@@ -328,7 +348,7 @@ module Gitorules
           matched << found.name if found
 
           if found
-            diff_ruleset_update(repo, found, wanted, io, quiet)
+            diff_ruleset_update(repo, found, wanted, config, io, quiet)
           else
             diff_ruleset_create(wanted, io, quiet)
           end
@@ -357,7 +377,7 @@ module Gitorules
       end
     end
 
-    private def diff_ruleset_update(repo : String, existing_rs : Ruleset, wanted : Ruleset, io : IO, quiet : Bool = false)
+    private def diff_ruleset_update(repo : String, existing_rs : Ruleset, wanted : Ruleset, config : BranchRuleConfig, io : IO, quiet : Bool = false)
       id = existing_rs.id
       unless id
         diff_ruleset_create(wanted, io, quiet)
@@ -379,6 +399,10 @@ module Gitorules
       added = wanted_rules - existing_rules
       removed = existing_rules - wanted_rules
 
+      if config.glob_checks?
+        removed.delete("required_status_checks")
+      end
+
       unless added.empty? && removed.empty?
         added.each { |r| changes << diff_add(r, io) }
         removed.each { |r| changes << diff_remove(r, io) }
@@ -398,6 +422,10 @@ module Gitorules
             changes << "#{key}: #{existing_val} → #{wanted_val}"
           end
         end
+      end
+
+      if config.glob_checks? && full.rules.any? { |r| r.type == "required_status_checks" }
+        changes << diff_unchanged("required_status_checks (matched by glob pattern, left unchanged)", io)
       end
 
       if changes.empty?
@@ -482,7 +510,7 @@ module Gitorules
                 wanted = build_type_ruleset(type, config)
                 names = type_match_names(type, config)
                 found = existing.find(&.name.in?(names))
-                apply_json_ruleset(json, repo, found, wanted, dry_run)
+                apply_json_ruleset(json, repo, found, wanted, config, dry_run)
               end
             end
           end
@@ -490,7 +518,7 @@ module Gitorules
       end
     end
 
-    private def apply_json_ruleset(json : JSON::Builder, repo : String, existing : Ruleset?, wanted : Ruleset, dry_run : Bool)
+    private def apply_json_ruleset(json : JSON::Builder, repo : String, existing : Ruleset?, wanted : Ruleset, config : BranchRuleConfig, dry_run : Bool)
       if dry_run || (!existing || !existing.id)
         action = (!existing || !existing.id) ? "create" : "update"
         json.object do
@@ -498,6 +526,7 @@ module Gitorules
           json.field "name", wanted.name
           json.field "dry_run", true if dry_run
           json.field "id", existing.id if existing && existing.id
+          json_apply_checks_skipped(json, action, config)
         end
         return
       end
@@ -509,6 +538,12 @@ module Gitorules
       end
     end
 
+    private def json_apply_checks_skipped(json : JSON::Builder, action : String, config : BranchRuleConfig)
+      if action == "create" && config.glob_checks?
+        json.field "checks_skipped", true
+      end
+    end
+
     private def apply_repo(repo : String, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false)
       existing = @client.list_rulesets(repo)
 
@@ -517,7 +552,7 @@ module Gitorules
           wanted = build_type_ruleset(type, config)
           names = type_match_names(type, config)
           found = existing.find(&.name.in?(names))
-          apply_ruleset(repo, found, wanted, dry_run, io, prefix, quiet)
+          apply_ruleset(repo, found, wanted, config, dry_run, io, prefix, quiet)
         end
       end
     end
@@ -576,7 +611,9 @@ module Gitorules
       rules << Rule.new("pull_request", merge_method_params(config.merge_method))
 
       if checks = config.checks
-        rules << Rule.new("required_status_checks", required_status_checks_params(checks))
+        unless config.glob_checks?
+          rules << Rule.new("required_status_checks", required_status_checks_params(checks))
+        end
       end
 
       Ruleset.new(
@@ -617,7 +654,7 @@ module Gitorules
       }
     end
 
-    private def apply_ruleset(repo : String, existing : Ruleset?, wanted : Ruleset, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false)
+    private def apply_ruleset(repo : String, existing : Ruleset?, wanted : Ruleset, config : BranchRuleConfig, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false)
       if dry_run
         if existing && existing.id
           io.puts "#{prefix}#{repo}: Would update ruleset '#{wanted.name}' (ID #{existing.id})" unless quiet
@@ -628,11 +665,24 @@ module Gitorules
       end
 
       if existing && (id = existing.id)
+        if config.glob_checks?
+          begin
+            full = @client.get_ruleset(repo, id)
+            if existing_checks = full.rules.find { |r| r.type == "required_status_checks" }
+              wanted.rules << existing_checks unless wanted.rules.any? { |r| r.type == "required_status_checks" }
+            end
+          rescue
+          end
+        end
         @client.update_ruleset(repo, id, wanted)
         io.puts "#{prefix}#{repo}: Updated ruleset '#{wanted.name}'" unless quiet
       else
+        if config.glob_checks?
+          io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}' (checks skipped — glob patterns can't be applied on create)" unless quiet
+        else
+          io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}'" unless quiet
+        end
         @client.create_ruleset(repo, wanted)
-        io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}'" unless quiet
       end
     end
 

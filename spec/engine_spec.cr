@@ -676,5 +676,275 @@ module Gitorules
         json[0]["types"]["release"]["exists"].should be_false
       end
     end
+
+    describe "#status with glob checks" do
+      before_each do
+        WebMock.reset
+      end
+
+      it "shows +checks for matching glob pattern" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/1")
+          .to_return(body: %({"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "CI / test (1.20.0)"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        io = IO::Memory.new
+        glob_engine.status([repo], io: io)
+        STRIP_ANSI.call(io.to_s).should contain("+checks")
+      end
+
+      it "shows ~checks for non-matching glob pattern" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 2, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/2")
+          .to_return(body: %({"id": 2, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Lint"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        io = IO::Memory.new
+        glob_engine.status([repo], io: io)
+        STRIP_ANSI.call(io.to_s).should contain("~checks")
+      end
+
+      it "shows -checks when checks rule missing with glob pattern" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 3, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/3")
+          .to_return(body: %({"id": 3, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}}
+          ]}))
+
+        io = IO::Memory.new
+        glob_engine.status([repo], io: io)
+        STRIP_ANSI.call(io.to_s).should contain("-checks")
+      end
+    end
+
+    describe "#diff with glob checks" do
+      before_each do
+        WebMock.reset
+      end
+
+      it "shows glob note when ruleset exists with required_status_checks" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 10, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/10")
+          .to_return(body: %({"id": 10, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "CI / test (1.20.0)"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        io = IO::Memory.new
+        glob_engine.diff([repo], io: io)
+        io.to_s.should contain("matched by glob pattern")
+        io.to_s.should contain("~ Update")
+      end
+
+      it "creates ruleset without required_status_checks for glob patterns" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        io = IO::Memory.new
+        glob_engine.diff([repo], io: io)
+        io.to_s.should_not contain("required_status_checks")
+      end
+    end
+
+    describe "#apply with glob checks" do
+      before_each do
+        WebMock.reset
+      end
+
+      it "shows warning when creating ruleset with glob checks" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        WebMock.stub(:post, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %({"id": 1, "name": "test", "enforcement": "active", "target": "branch", "rules": []}))
+
+        io = IO::Memory.new
+        glob_engine.apply([repo], dry_run: false, io: io)
+        io.to_s.should contain("checks skipped")
+      end
+
+      it "dry-run shows would create with glob checks" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        io = IO::Memory.new
+        glob_engine.apply([repo], dry_run: true, io: io)
+        io.to_s.should contain("Would create")
+      end
+    end
+
+    describe "#status_json with glob checks" do
+      before_each do
+        WebMock.reset
+      end
+
+      it "checks_ok true for matching glob pattern" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/1")
+          .to_return(body: %({"id": 1, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "CI / test (1.20.0)"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        io = IO::Memory.new
+        glob_engine.status_json([repo], io)
+        json = JSON.parse(io.to_s).as_a
+        json[0]["types"]["default_branch"]["checks_ok"].should be_true
+      end
+
+      it "checks_ok false for non-matching glob pattern" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %([{"id": 2, "name": "master", "enforcement": "active", "target": "branch", "rules": []}]))
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets/2")
+          .to_return(body: %({"id": 2, "name": "master", "enforcement": "active", "target": "branch", "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false, "required_reviewers": []}},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Lint"}], "strict_required_status_checks_policy": true}}
+          ]}))
+
+        io = IO::Memory.new
+        glob_engine.status_json([repo], io)
+        json = JSON.parse(io.to_s).as_a
+        json[0]["types"]["default_branch"]["checks_ok"].should be_false
+      end
+    end
+
+    describe "#apply_json with glob checks" do
+      before_each do
+        WebMock.reset
+      end
+
+      it "checks_skipped true for create with glob pattern" do
+        glob_config = Config.from_yaml("org: unurgunite\nrepos:\n  - docscribe\nrules:\n  default_branch:\n    merge: only\n    checks: [\"CI /*\"]\n")
+        glob_engine = Engine.new(client, glob_config)
+
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: "[]")
+
+        WebMock.stub(:post, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
+          .to_return(body: %({"id": 1, "name": "test", "enforcement": "active", "target": "branch", "rules": []}))
+
+        io = IO::Memory.new
+        glob_engine.apply_json([repo], dry_run: false, io: io)
+        json = JSON.parse(io.to_s).as_a
+        json[0]["results"].as_a.each do |r|
+          if r["action"].to_s == "create"
+            r["checks_skipped"].should be_true
+          end
+        end
+      end
+    end
+
+    describe BranchRuleConfig do
+      describe "#glob_checks?" do
+        it "returns true when checks contain *" do
+          bc = BranchRuleConfig.new
+          bc.checks = ["CI / *"]
+          bc.glob_checks?.should be_true
+        end
+
+        it "returns true when checks contain ?" do
+          bc = BranchRuleConfig.new
+          bc.checks = ["test?"]
+          bc.glob_checks?.should be_true
+        end
+
+        it "returns false for exact checks" do
+          bc = BranchRuleConfig.new
+          bc.checks = ["check / check"]
+          bc.glob_checks?.should be_false
+        end
+
+        it "returns false when checks is nil" do
+          bc = BranchRuleConfig.new
+          bc.glob_checks?.should be_false
+        end
+      end
+
+      describe "#checks_match?" do
+        it "matches glob pattern against actual checks" do
+          bc = BranchRuleConfig.new
+          bc.checks = ["CI / *"]
+          bc.checks_match?(["CI / test (1.0)", "CI / build"]).should be_true
+        end
+
+        it "fails when glob pattern doesn't match" do
+          bc = BranchRuleConfig.new
+          bc.checks = ["CI / *"]
+          bc.checks_match?(["Lint"]).should be_false
+        end
+
+        it "matches exact patterns" do
+          bc = BranchRuleConfig.new
+          bc.checks = ["check / check"]
+          bc.checks_match?(["check / check"]).should be_true
+        end
+
+        it "fails when exact pattern not found" do
+          bc = BranchRuleConfig.new
+          bc.checks = ["check / check"]
+          bc.checks_match?(["other"]).should be_false
+        end
+
+        it "returns false for empty actual" do
+          bc = BranchRuleConfig.new
+          bc.checks = ["CI / *"]
+          bc.checks_match?([] of String).should be_false
+        end
+
+        it "returns false when checks is nil" do
+          bc = BranchRuleConfig.new
+          bc.checks_match?(["check"]).should be_false
+        end
+      end
+    end
   end
 end
