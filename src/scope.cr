@@ -117,7 +117,7 @@ module Gitorules
             return org_config.rules
           end
         end
-        return nil
+        return
       end
 
       base = @config.defaults.try(&.rules)
@@ -171,9 +171,9 @@ module Gitorules
     # Returns nil for blank input (meaning: process everything).
     # Raises ArgumentError with a plain-language message for unknown values.
     def self.parse_only(raw : String?) : Set(String)?
-      return nil if raw.nil?
+      return if raw.nil?
       cleaned = raw.strip
-      return nil if cleaned.empty?
+      return if cleaned.empty?
 
       parts = cleaned.split(",").map(&.strip.downcase).reject(&.empty?).uniq!
       invalid = parts.reject { |part| VALID_ONLY_VALUES.includes?(part) }

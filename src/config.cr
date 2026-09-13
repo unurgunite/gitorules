@@ -212,21 +212,28 @@ module Gitorules
     private def discover_for_scope(patterns : Array(String)) : Array(String)
       orgs = patterns.compact_map do |pattern|
         parts = pattern.split("/")
-        next nil if parts.size < 2
+        next if parts.size < 2
         org = parts.first.strip
-        next nil if org.empty? || ScopeResolver.glob?(org)
+        next if org.empty? || ScopeResolver.glob?(org)
         org
       end.uniq!
 
       result = [] of String
       orgs.each do |org|
-        begin
-          result.concat(discover_repos(org))
-        rescue ex
-          raise "Failed to list repositories for organization '#{org}': #{ex.message}"
-        end
+        result.concat(discover_org_repos(org))
       end
       result
+    end
+
+    # Lists repositories of a single organization for scope expansion.
+    #
+    # @param org [String] GitHub organization name
+    # @return [Array(String)] Repository names prefixed with org
+    # @raise [Exception] With organization context when listing fails
+    private def discover_org_repos(org : String) : Array(String)
+      discover_repos(org)
+    rescue ex
+      raise "Failed to list repositories for organization '#{org}': #{ex.message}"
     end
   end
 end

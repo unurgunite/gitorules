@@ -158,6 +158,10 @@ module Gitorules
         return 0
       end
 
+      run_with_options(options, config_path, input_io)
+    end
+
+    private def self.run_with_options(options : Options, config_path : String, input_io : IO) : Int32
       client = build_client(options)
 
       # Handle init separately — no config needed
@@ -358,54 +362,62 @@ module Gitorules
     # Headers and counters always print (unless --quiet). Per-repo
     # details print only with --verbose to keep scoped output concise.
     private def self.cmd_diff_scoped(engine : Engine, groups : Hash(String, Array(String)), options : Options, io : IO) : Int32
-      total_repos = 0
-      scopes_with_changes = 0
+      total_repos = groups.sum { |_, scope_repos| scope_repos.size }
+      scopes_with_changes = groups.count { |scope_name, scope_repos| diff_one_scope(engine, scope_name, scope_repos, options, io) }
 
-      groups.each do |scope_name, scope_repos|
-        total_repos += scope_repos.size
-        if scope_repos.empty?
-          io.puts "Scope: #{scope_name} (0 repos)" unless options.quiet?
-          next
-        end
-
-        repo_word = scope_repos.size == 1 ? "repo" : "repos"
-        io.puts "Scope: #{scope_name} (#{scope_repos.size} #{repo_word})" unless options.quiet?
-
-        diff_io = IO::Memory.new
-        engine.diff(scope_repos, io: diff_io)
-        diff_text = diff_io.to_s
-        has_changes = diff_has_changes?(diff_text)
-        scopes_with_changes += 1 if has_changes
-
-        if options.verbose?
-          io.print diff_text unless options.quiet?
-        else
-          summary = diff_text.lines.last? || "Done: #{scope_repos.size} repos processed"
-          io.puts summary.strip unless options.quiet?
-          unless options.quiet?
-            if has_changes
-              io.puts "  (#{scope_repos.size} #{repo_word}, changes detected - use --verbose for details)"
-            else
-              io.puts "  (no changes)"
-            end
-          end
-        end
-      end
-
-      unless options.quiet?
-        total_word = total_repos == 1 ? "repo" : "repos"
-        scope_word = groups.size == 1 ? "scope" : "scopes"
-        io.puts "Total: #{total_repos} #{total_word} in #{groups.size} #{scope_word}, #{scopes_with_changes} with changes"
-      end
+      print_diff_totals(io, options, total_repos, groups.size, scopes_with_changes)
 
       scopes_with_changes > 0 ? 1 : 0
     end
 
+    private def self.diff_one_scope(engine : Engine, scope_name : String, scope_repos : Array(String), options : Options, io : IO) : Bool
+      if scope_repos.empty?
+        io.puts "Scope: #{scope_name} (0 repos)" unless options.quiet?
+        return false
+      end
+
+      repo_word = scope_repos.size == 1 ? "repo" : "repos"
+      io.puts "Scope: #{scope_name} (#{scope_repos.size} #{repo_word})" unless options.quiet?
+
+      diff_io = IO::Memory.new
+      engine.diff(scope_repos, io: diff_io)
+      diff_text = diff_io.to_s
+      has_changes = diff_has_changes?(diff_text)
+
+      print_scope_result(io, options, diff_text, scope_repos.size, repo_word, has_changes)
+      has_changes
+    end
+
+    private def self.print_scope_result(io : IO, options : Options, diff_text : String, repo_count : Int32, repo_word : String, has_changes : Bool)
+      if options.verbose?
+        io.print diff_text unless options.quiet?
+        return
+      end
+
+      summary = diff_text.lines.last? || "Done: #{repo_count} repos processed"
+      io.puts summary.strip unless options.quiet?
+      return if options.quiet?
+
+      if has_changes
+        io.puts "  (#{repo_count} #{repo_word}, changes detected - use --verbose for details)"
+      else
+        io.puts "  (no changes)"
+      end
+    end
+
+    private def self.print_diff_totals(io : IO, options : Options, total_repos : Int32, scope_count : Int32, scopes_with_changes : Int32)
+      return if options.quiet?
+
+      total_word = total_repos == 1 ? "repo" : "repos"
+      scope_word = scope_count == 1 ? "scope" : "scopes"
+      io.puts "Total: #{total_repos} #{total_word} in #{scope_count} #{scope_word}, #{scopes_with_changes} with changes"
+    end
+
     private def self.diff_has_changes?(diff_text : String) : Bool
-      diff_text.lines.any? { |line|
+      diff_text.lines.any? do |line|
         stripped = line.strip
         stripped.starts_with?("+") || stripped.starts_with?("-") || stripped.starts_with?("~")
-      }
+      end
     end
 
     private def self.handle_init(options : Options, client : GitHubClient) : Int32
