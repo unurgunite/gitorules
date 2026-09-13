@@ -211,7 +211,7 @@ module Gitorules
     # @param link_header [String?] Raw Link header value or nil
     # @return [String?] Next page URL or nil when absent
     private def next_page_url(link_header : String?) : String?
-      return nil unless link_header
+      return unless link_header
       link_header.split(",").each do |part|
         if m = part.match(/<([^>]+)>\s*;\s*rel="([^"]+)"/)
           return m[1] if m[2] == "next"

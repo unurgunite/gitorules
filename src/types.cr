@@ -94,8 +94,8 @@ struct BranchRuleConfig
     warnings = [] of String
 
     {% for field in ["merge", "squash", "rebase"] %}
-      unless (value = {{field.id}}) == "only" || value.nil?
-        errors << "rules.#{type_name}.#{ {{field}} }: expected \"only\" or nil, got #{value.inspect}"
+      unless (value = {{ field.id }}) == "only" || value.nil?
+        errors << "rules.#{type_name}.#{ {{ field }} }: expected \"only\" or nil, got #{value.inspect}"
       end
     {% end %}
 
@@ -125,7 +125,7 @@ struct BranchRuleConfig
   # Exact patterns use direct equality, glob patterns use File.match?.
   @[YAML::Field(ignore: true)]
   def checks_match?(actual : Array(String)) : Bool
-    expected = self.checks
+    expected = checks
     return false unless expected
     return false if actual.empty?
 
@@ -206,10 +206,10 @@ struct Config
   # @param repo [String] Full repository name (org/repo)
   # @return [Hash(String, BranchRuleConfig)?] Rules for the repo's org
   def rules_for(repo : String) : Hash(String, BranchRuleConfig)?
-    return self.rules if self.rules # single-org mode
+    return rules if rules # single-org mode
 
     org_name = repo.split("/").first?
-    if org_name && (config_orgs = self.orgs)
+    if org_name && (config_orgs = orgs)
       org_config = config_orgs[org_name]?
       return org_config.rules if org_config
     end
