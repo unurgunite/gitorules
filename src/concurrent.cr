@@ -34,7 +34,7 @@ module Gitorules
       return [] of U if n.zero?
 
       workers = pool_size.clamp(1, n)
-      jobs = Channel({Int32, T} | Nil).new(n + workers)
+      jobs = Channel({Int32, T}?).new(n + workers)
       results = Channel({Int32, U | Exception}).new(n)
       handler = block
 
