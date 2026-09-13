@@ -44,11 +44,12 @@ module Gitorules
     private def self.execute(args : Array(String), input_io : IO = STDIN)
       options = Options.new
       config_path = ".gitorules.yml"
+      in_place = false
       help_text = ""
 
       OptionParser.parse(args) do |parser|
         help_text = parser.to_s
-        parser.banner = "Usage: gitorules <status|apply|diff|init> [options]\n\nCommands:\n"
+        parser.banner = "Usage: gitorules <status|apply|diff|init|lint|migrate> [options]\n\nCommands:\n"
 
         parser.on("status", "Show ruleset status for repositories") do
           options.mode = "status"
@@ -64,6 +65,14 @@ module Gitorules
 
         parser.on("init", "Generate .gitorules.yml from existing rulesets") do
           options.mode = "init"
+        end
+
+        parser.on("lint", "Validate config file schema and values") do
+          options.mode = "lint"
+        end
+
+        parser.on("migrate", "Convert legacy config to defaults/scopes shape") do
+          options.mode = "migrate"
         end
 
         parser.separator "\nOptions:\n"
@@ -123,6 +132,10 @@ module Gitorules
           config_path = v
         end
 
+        parser.on("--in-place", "Overwrite config file in place (migrate only)") do
+          in_place = true
+        end
+
         parser.on("--version", "Show version") do
           puts "gitorules v#{VERSION}"
           raise ExitSignal.new(0)
@@ -137,6 +150,19 @@ module Gitorules
       if options.mode.empty?
         puts help_text
         return 0
+      end
+
+      # Offline commands need no auth token.
+      if options.mode == "lint"
+        return Linter.lint_file(config_path)
+      end
+
+      if options.mode == "migrate"
+        return Migrator.migrate_file(config_path, in_place)
+      end
+
+      if in_place
+        STDERR.puts "Warning: --in-place has no effect on '#{options.mode}' command"
       end
 
       client = build_client(options)

@@ -3,6 +3,7 @@ require "./github"
 require "./config"
 require "./engine"
 require "./init"
+require "./lint"
 require "./cli"
 
 module Gitorules
