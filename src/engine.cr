@@ -17,7 +17,7 @@ module Gitorules
         unless only == "labels"
           begin
             status_repo_line(repo, types, io, prefix, quiet)
-          rescue ex
+          rescue
             io.puts error_io_line(repo, types, prefix, io) unless quiet
             errors += 1
           end
@@ -53,7 +53,7 @@ module Gitorules
       begin
         rulesets = @client.list_rulesets(repo)
         types.each { |type| results[type] = status_type_result(repo, rulesets, type, rules, io) }
-      rescue ex
+      rescue
         io.puts error_io_line(repo, types, prefix, io) unless quiet
         return
       end
@@ -216,15 +216,13 @@ module Gitorules
       io.puts(JSON.build do |json|
         json.array do
           repos.each do |repo|
-            begin
-              diff_json_repo(json, repo, only)
-            rescue ex
-              json.object do
-                json.field "repo", repo
-                json.field "error", ex.message
-              end
-              errors += 1
+            diff_json_repo(json, repo, only)
+          rescue ex
+            json.object do
+              json.field "repo", repo
+              json.field "error", ex.message
             end
+            errors += 1
           end
         end
       end)
@@ -369,48 +367,52 @@ module Gitorules
     end
 
     private def diff_repo(repo : String, io : IO, prefix : String = "", quiet : Bool = false, only : String? = nil)
-      unless only == "labels"
-        begin
-          existing = @client.list_rulesets(repo)
-        rescue ex
-          io.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
-          return
-        end
+      diff_repo_rulesets(repo, io, prefix, quiet) unless only == "labels"
+      diff_repo_labels(repo, io, prefix, quiet) if labels_configured? && only != "rulesets"
+    end
 
-        io.puts "#{prefix}=== #{repo} ===" unless quiet
+    private def diff_repo_rulesets(repo : String, io : IO, prefix : String, quiet : Bool)
+      existing = fetch_rulesets_or_report(repo, io, prefix, quiet)
+      return unless existing
 
-        matched = Set(String).new
+      io.puts "#{prefix}=== #{repo} ===" unless quiet
 
-        if repo_rules = @config.rules_for(repo)
-          repo_rules.each do |type, config|
-            wanted = build_type_ruleset(type, config)
-            names = type_match_names(type, config)
-            found = existing.find(&.name.in?(names))
-            matched << found.name if found
+      matched = Set(String).new
 
-            if found
-              diff_ruleset_update(repo, found, wanted, config, io, quiet)
-            else
-              diff_ruleset_create(wanted, io, quiet)
-            end
+      if repo_rules = @config.rules_for(repo)
+        repo_rules.each do |type, config|
+          wanted = build_type_ruleset(type, config)
+          names = type_match_names(type, config)
+          found = existing.find(&.name.in?(names))
+          matched << found.name if found
+
+          if found
+            diff_ruleset_update(repo, found, wanted, config, io, quiet)
+          else
+            diff_ruleset_create(wanted, io, quiet)
           end
         end
-
-        existing.each do |rs|
-          next if rs.name.in?(matched)
-          io.puts "  #{diff_orphan(rs.name, io)}" unless quiet
-        end
-
-        io.puts "" unless quiet
       end
 
-      if labels_configured? && only != "rulesets"
-        begin
-          label_resource.diff(repo, quiet, io, prefix)
-        rescue ex
-          io.puts "#{prefix}#{repo}: labels Error: #{ex.message}" unless quiet
-        end
+      existing.each do |rs|
+        next if rs.name.in?(matched)
+        io.puts "  #{diff_orphan(rs.name, io)}" unless quiet
       end
+
+      io.puts "" unless quiet
+    end
+
+    private def fetch_rulesets_or_report(repo : String, io : IO, prefix : String, quiet : Bool) : Array(Ruleset)?
+      @client.list_rulesets(repo)
+    rescue ex
+      io.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
+      nil
+    end
+
+    private def diff_repo_labels(repo : String, io : IO, prefix : String, quiet : Bool)
+      label_resource.diff(repo, quiet, io, prefix)
+    rescue ex
+      io.puts "#{prefix}#{repo}: labels Error: #{ex.message}" unless quiet
     end
 
     private def diff_ruleset_create(wanted : Ruleset, io : IO, quiet : Bool = false)
@@ -441,6 +443,21 @@ module Gitorules
         return
       end
 
+      changes = diff_rule_changes(full, wanted, config, io)
+
+      if config.glob_checks? && full.rules.any? { |r| r.type == "required_status_checks" }
+        changes << diff_unchanged("required_status_checks (matched by glob pattern, left unchanged)", io)
+      end
+
+      if changes.empty?
+        io.puts "  #{wanted.name}: #{diff_unchanged("no changes", io)}" unless quiet
+      else
+        io.puts "  #{diff_change("Update ruleset '#{wanted.name}'", io)}" unless quiet
+        changes.each { |c| io.puts "    #{c}" } unless quiet
+      end
+    end
+
+    private def diff_rule_changes(full : Ruleset, wanted : Ruleset, config : BranchRuleConfig, io : IO) : Array(String)
       changes = [] of String
 
       existing_rules = Set.new(full.rules.map(&.type))
@@ -462,28 +479,27 @@ module Gitorules
         existing_rule = full.rules.find { |r| r.type == wanted_rule.type }
         next unless existing_rule
 
-        wanted_params = wanted_rule.parameters
-        existing_params = existing_rule.parameters
-        next unless wanted_params && existing_params
+        changes.concat(diff_rule_param_changes(existing_rule, wanted_rule))
+      end
 
-        wanted_params.each do |key, wanted_val|
-          existing_val = existing_params[key]?
-          if existing_val != wanted_val
-            changes << "#{key}: #{existing_val} → #{wanted_val}"
-          end
+      changes
+    end
+
+    private def diff_rule_param_changes(existing_rule : Rule, wanted_rule : Rule) : Array(String)
+      changes = [] of String
+
+      wanted_params = wanted_rule.parameters
+      existing_params = existing_rule.parameters
+      return changes unless wanted_params && existing_params
+
+      wanted_params.each do |key, wanted_val|
+        existing_val = existing_params[key]?
+        if existing_val != wanted_val
+          changes << "#{key}: #{existing_val} → #{wanted_val}"
         end
       end
 
-      if config.glob_checks? && full.rules.any? { |r| r.type == "required_status_checks" }
-        changes << diff_unchanged("required_status_checks (matched by glob pattern, left unchanged)", io)
-      end
-
-      if changes.empty?
-        io.puts "  #{wanted.name}: #{diff_unchanged("no changes", io)}" unless quiet
-      else
-        io.puts "  #{diff_change("Update ruleset '#{wanted.name}'", io)}" unless quiet
-        changes.each { |c| io.puts "    #{c}" } unless quiet
-      end
+      changes
     end
 
     private def diff_add(text : String, io : IO) : String
@@ -526,15 +542,13 @@ module Gitorules
       io.puts(JSON.build do |json|
         json.array do
           repos.each do |repo|
-            begin
-              apply_json_repo(json, repo, dry_run, only)
-            rescue ex
-              json.object do
-                json.field "repo", repo
-                json.field "error", ex.message
-              end
-              errors += 1
+            apply_json_repo(json, repo, dry_run, only)
+          rescue ex
+            json.object do
+              json.field "repo", repo
+              json.field "error", ex.message
             end
+            errors += 1
           end
         end
       end)
@@ -745,34 +759,44 @@ module Gitorules
 
     private def apply_ruleset(repo : String, existing : Ruleset?, wanted : Ruleset, config : BranchRuleConfig, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false)
       if dry_run
-        if existing && existing.id
-          io.puts "#{prefix}#{repo}: Would update ruleset '#{wanted.name}' (ID #{existing.id})" unless quiet
-        else
-          io.puts "#{prefix}#{repo}: Would create ruleset '#{wanted.name}'" unless quiet
-        end
+        apply_ruleset_dry_run(repo, existing, wanted, io, prefix, quiet)
         return
       end
 
       if existing && (id = existing.id)
-        if config.glob_checks?
-          begin
-            full = @client.get_ruleset(repo, id)
-            if existing_checks = full.rules.find { |r| r.type == "required_status_checks" }
-              wanted.rules << existing_checks unless wanted.rules.any? { |r| r.type == "required_status_checks" }
-            end
-          rescue
-          end
-        end
+        preserve_glob_checks(repo, id, wanted, config)
         @client.update_ruleset(repo, id, wanted)
         io.puts "#{prefix}#{repo}: Updated ruleset '#{wanted.name}'" unless quiet
       else
-        if config.glob_checks?
-          io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}' (checks skipped — glob patterns can't be applied on create)" unless quiet
-        else
-          io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}'" unless quiet
-        end
+        apply_ruleset_create_message(repo, wanted, config, io, prefix, quiet)
         @client.create_ruleset(repo, wanted)
       end
+    end
+
+    private def apply_ruleset_dry_run(repo : String, existing : Ruleset?, wanted : Ruleset, io : IO, prefix : String, quiet : Bool)
+      if existing && existing.id
+        io.puts "#{prefix}#{repo}: Would update ruleset '#{wanted.name}' (ID #{existing.id})" unless quiet
+      else
+        io.puts "#{prefix}#{repo}: Would create ruleset '#{wanted.name}'" unless quiet
+      end
+    end
+
+    private def apply_ruleset_create_message(repo : String, wanted : Ruleset, config : BranchRuleConfig, io : IO, prefix : String, quiet : Bool)
+      if config.glob_checks?
+        io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}' (checks skipped — glob patterns can't be applied on create)" unless quiet
+      else
+        io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}'" unless quiet
+      end
+    end
+
+    private def preserve_glob_checks(repo : String, id : Int64, wanted : Ruleset, config : BranchRuleConfig)
+      return unless config.glob_checks?
+
+      full = @client.get_ruleset(repo, id)
+      if existing_checks = full.rules.find { |r| r.type == "required_status_checks" }
+        wanted.rules << existing_checks unless wanted.rules.any? { |r| r.type == "required_status_checks" }
+      end
+    rescue
     end
 
     private def pad_to(text : String, width : Int32) : String

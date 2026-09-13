@@ -289,10 +289,10 @@ module Gitorules
     end
 
     private def self.diff_has_changes?(diff_text : String) : Bool
-      diff_text.lines.any? { |line|
+      diff_text.lines.any? do |line|
         stripped = line.strip
         stripped.starts_with?("+") || stripped.starts_with?("-") || stripped.starts_with?("~")
-      }
+      end
     end
 
     private def self.handle_init(options : Options, client : GitHubClient) : Int32

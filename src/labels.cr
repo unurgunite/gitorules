@@ -131,35 +131,51 @@ module Gitorules
       wants.each { |l| by_want[l.name] = l }
 
       entries.each do |entry|
-        case entry.action
-        when "create"
-          want = by_want[entry.name]
-          if dry_run
-            io.puts "#{prefix}#{repo}: Would create label '#{entry.name}'" unless quiet
-          else
-            @client.create_label(repo, want)
-            io.puts "#{prefix}#{repo}: Created label '#{entry.name}'" unless quiet
-          end
-        when "update"
-          want = by_want[entry.name]
-          if dry_run
-            io.puts "#{prefix}#{repo}: Would update label '#{entry.name}' (#{entry.changes.join(", ")})" unless quiet
-          else
-            @client.update_label(repo, entry.name, want)
-            io.puts "#{prefix}#{repo}: Updated label '#{entry.name}'" unless quiet
-          end
-        when "orphan"
-          if mode == LabelsSync::PRUNE
-            if dry_run
-              io.puts "#{prefix}#{repo}: Would delete label '#{entry.name}' (prune)" unless quiet
-            else
-              @client.delete_label(repo, entry.name)
-              io.puts "#{prefix}#{repo}: Deleted label '#{entry.name}'" unless quiet
-            end
-          else
-            io.puts "#{prefix}#{repo}: Orphan label '#{entry.name}' (warn only, kept)" unless quiet
-          end
+        apply_entry(repo, entry, by_want, mode, dry_run, quiet, io, prefix)
+      end
+    end
+
+    private def apply_entry(repo : String, entry : LabelChange, by_want : Hash(String, Label), mode : String, dry_run : Bool, quiet : Bool, io : IO, prefix : String)
+      case entry.action
+      when "create"
+        apply_create_entry(repo, entry, by_want, dry_run, quiet, io, prefix)
+      when "update"
+        apply_update_entry(repo, entry, by_want, dry_run, quiet, io, prefix)
+      when "orphan"
+        apply_orphan_entry(repo, entry, mode, dry_run, quiet, io, prefix)
+      end
+    end
+
+    private def apply_create_entry(repo : String, entry : LabelChange, by_want : Hash(String, Label), dry_run : Bool, quiet : Bool, io : IO, prefix : String)
+      want = by_want[entry.name]
+      if dry_run
+        io.puts "#{prefix}#{repo}: Would create label '#{entry.name}'" unless quiet
+      else
+        @client.create_label(repo, want)
+        io.puts "#{prefix}#{repo}: Created label '#{entry.name}'" unless quiet
+      end
+    end
+
+    private def apply_update_entry(repo : String, entry : LabelChange, by_want : Hash(String, Label), dry_run : Bool, quiet : Bool, io : IO, prefix : String)
+      want = by_want[entry.name]
+      if dry_run
+        io.puts "#{prefix}#{repo}: Would update label '#{entry.name}' (#{entry.changes.join(", ")})" unless quiet
+      else
+        @client.update_label(repo, entry.name, want)
+        io.puts "#{prefix}#{repo}: Updated label '#{entry.name}'" unless quiet
+      end
+    end
+
+    private def apply_orphan_entry(repo : String, entry : LabelChange, mode : String, dry_run : Bool, quiet : Bool, io : IO, prefix : String)
+      if mode == LabelsSync::PRUNE
+        if dry_run
+          io.puts "#{prefix}#{repo}: Would delete label '#{entry.name}' (prune)" unless quiet
+        else
+          @client.delete_label(repo, entry.name)
+          io.puts "#{prefix}#{repo}: Deleted label '#{entry.name}'" unless quiet
         end
+      else
+        io.puts "#{prefix}#{repo}: Orphan label '#{entry.name}' (warn only, kept)" unless quiet
       end
     end
 
