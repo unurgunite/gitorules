@@ -41,6 +41,9 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Allowlist](#allowlist)
     * [Behavior](#behavior)
     * [Token scopes](#token-scopes)
+    * [Gradle pack](#gradle-pack)
+    * [Extension points](#extension-points)
+    * [Minimal packs](#minimal-packs)
 * [JSON output](#json-output)
 * [Development](#development)
 * [Contributing](#contributing)
@@ -477,6 +480,102 @@ exit code 2 before any API write.
 Workflow sync needs `contents:write` (covered by the classic `repo` scope).
 For fine-grained tokens, grant **Contents** read and write on the managed
 repositories.
+
+### Gradle pack
+
+`templates/gradle/ci.yml` is an IntelliJ plugin CI template. It defines a
+single `build` job on `ubuntu-latest`, so the required check context stays
+stable as `CI / build`.
+
+Job steps in order:
+
+- checkout (`actions/checkout@v4`)
+- setup Java 21 on Temurin (`actions/setup-java@v4`, `cache: gradle`)
+- install Crystal (pinned version via `crystal-lang/install-crystal@v1`)
+- setup Gradle (`gradle/actions/setup-gradle@v4`)
+- version-consistency check: `pluginVersion` from `gradle.properties`
+  must match the commit message tag `[x.y.z]`, and `CHANGELOG.md` must
+  contain a matching `## [x.y.z]` section
+- test (`./gradlew test`)
+- verify (`./gradlew verifyPlugin`)
+- build (`./gradlew buildPlugin`)
+- upload (`actions/upload-artifact@v4`, `build/libs/*.zip`)
+
+Usage:
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/gradle/ci.yml
+```
+
+Require the stable context in branch protection:
+
+```yaml
+rules:
+  default_branch:
+    merge: only
+    checks:
+      - "CI / build"
+```
+
+### Extension points
+
+Some repositories need project-specific steps (for example a change-notes
+check that compares `CHANGELOG.md` against `plugin.xml`). The base template
+stays intact; overrides are explicit files appended at a marked anchor.
+
+Declare an extra-steps file per workflow entry:
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/gradle/ci.yml
+    extra_steps: templates/gradle/extra-steps.example.yml
+```
+
+Rules:
+
+- `extra_steps` is a local YAML file with a list of steps. It is appended
+  verbatim after the `# gitorules:extra-steps` marker in the base template.
+- Keep the 6-space indent in the extra file so the result stays valid YAML
+  under `jobs.build.steps`.
+- `extra_steps_anchor` optionally renames the marker (default:
+  `gitorules:extra-steps`). A blank anchor is an error.
+- An unknown anchor is an error: the marker must exist in the base file.
+- There are no silent full-file overrides. Unknown workflow fields are
+  rejected by `gitorules lint`, and missing or invalid extra files fail
+  the sync for that repository.
+
+Example extra steps (see `templates/gradle/extra-steps.example.yml`):
+
+```yaml
+- name: Check change notes
+  run: ./gradlew checkChangeNotes
+```
+
+### Minimal packs
+
+Small starting points for non-Gradle repositories. Both use a single
+`build` job (`CI / build`) and expose the same `# gitorules:extra-steps`
+anchor.
+
+- `templates/python/ci.yml`: `setup-python` matrix (`3.11`, `3.12`) with
+  `pip` cache, dependency install, and a `pytest` skeleton.
+- `templates/shell/ci.yml`: `shellcheck` over `**/*.sh` plus a test
+  skeleton that runs `bats test/` when available.
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/python/ci.yml
+```
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/shell/ci.yml
+```
 
 ### Labels
 Labels apply to every managed repository selected for the run.

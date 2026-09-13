@@ -1,4 +1,5 @@
 require "digest/sha1"
+require "yaml"
 
 module Gitorules
   # Raised when a workflow target violates the allowlist.
@@ -33,10 +34,25 @@ module Gitorules
   #     source: templates/ci.yml
   # ```
   #
+  # Per-repo extension points use an explicit extra-steps file:
+  #
+  # ```yaml
+  # workflows:
+  #   ci.yml:
+  #     source: templates/gradle/ci.yml
+  #     extra_steps: templates/gradle/extra-steps.example.yml
+  # ```
+  #
+  # Extra steps are appended verbatim after the anchor marker
+  # (`# gitorules:extra-steps`) in the base template. The base file
+  # stays intact; there are no silent full-file overrides. Unknown
+  # anchors raise `WorkflowError`.
+  #
   # Only `.github/workflows/*.yml` targets are allowed. Validation runs
   # before any API write; violations raise `WorkflowError`.
   class WorkflowResource
-    TARGET_PREFIX = ".github/workflows/"
+    TARGET_PREFIX              = ".github/workflows/"
+    EXTRA_STEPS_ANCHOR_DEFAULT = "gitorules:extra-steps"
 
     @client : GitHubClient
 
@@ -81,6 +97,76 @@ module Gitorules
       Digest::SHA1.hexdigest("blob #{content.bytesize}\0#{content}")
     end
 
+    # Resolves the anchor marker name for a workflow entry.
+    #
+    # @param entry [WorkflowConfig] Workflow configuration
+    # @return [String] Anchor name without the leading `#`
+    def self.extra_anchor(entry : WorkflowConfig) : String
+      raw = entry.extra_steps_anchor.try(&.strip)
+      if raw.nil? || raw.empty?
+        EXTRA_STEPS_ANCHOR_DEFAULT
+      else
+        raw
+      end
+    end
+
+    # Returns true when a base template line is the anchor marker.
+    #
+    # @param line [String] Single base template line
+    # @param anchor [String] Anchor name (e.g. "gitorules:extra-steps")
+    # @return [Bool] True for the `# <anchor>` comment line
+    def self.anchor_line?(line : String, anchor : String) : Bool
+      line.strip == "# #{anchor.strip}"
+    end
+
+    # Inserts extra steps after the anchor marker.
+    #
+    # The base content is otherwise untouched. Blank extra content
+    # returns the base unchanged.
+    #
+    # @param base [String] Base template content
+    # @param extra [String] Extra steps YAML snippet (list of steps)
+    # @param anchor [String] Anchor marker name
+    # @return [String] Resolved content with extra steps inserted
+    # @raise [WorkflowError] On blank anchor, invalid YAML, or unknown anchor
+    def self.apply_extra_steps(base : String, extra : String, anchor : String = EXTRA_STEPS_ANCHOR_DEFAULT) : String
+      clean_anchor = anchor.strip
+      if clean_anchor.empty?
+        raise WorkflowError.new("Invalid extra_steps_anchor: anchor must not be blank")
+      end
+      return base if extra.strip.empty?
+
+      begin
+        parsed = YAML.parse(extra)
+      rescue ex : YAML::ParseException
+        raise WorkflowError.new("Invalid extra_steps YAML (#{ex.message}). Fix: provide a YAML list of steps starting with '- name: ...'.")
+      end
+      unless parsed.as_a?
+        raise WorkflowError.new("Invalid extra_steps content: expected a YAML list of steps. Fix: start the file with '- name: ...'.")
+      end
+
+      base_lines = base.split("\n")
+      had_trailing_newline = base.ends_with?("\n")
+      # Drop the artifact empty element from a trailing newline for indexing.
+      base_lines.pop if had_trailing_newline && !base_lines.empty? && base_lines.last.empty?
+
+      idx = base_lines.index { |line| anchor_line?(line, clean_anchor) }
+      unless idx
+        raise WorkflowError.new("Unknown extra_steps anchor '#{clean_anchor}': anchor marker not found in base template")
+      end
+
+      extra_lines = extra.rstrip("\n").split("\n")
+      resolved = [] of String
+      resolved.concat(base_lines[0..idx])
+      resolved.concat(extra_lines)
+      if idx + 1 < base_lines.size
+        resolved.concat(base_lines[(idx + 1)..])
+      end
+      result = resolved.join("\n")
+      result += "\n" if had_trailing_newline || !result.ends_with?("\n")
+      result
+    end
+
     # Validates every workflow target before any API write.
     #
     # @param workflows [Hash(String, WorkflowConfig)] Configured workflows
@@ -111,19 +197,20 @@ module Gitorules
     #
     # Compares the local template blob sha against the remote sha:
     # equal shas plan "unchanged", missing files plan "create",
-    # differing files plan "update".
+    # differing files plan "update". Local content includes any
+    # configured `extra_steps` appended at the anchor marker.
     #
     # @param repo [String] Full repository name (owner/name)
     # @param workflows [Hash(String, WorkflowConfig)] Configured workflows
     # @return [Array(WorkflowPlan)] Planned actions in config order
-    # @raise [WorkflowError] On disallowed target
+    # @raise [WorkflowError] On disallowed target or unknown anchor
     # @raise [RuntimeError] When a template source is missing or unreadable
     def plan_repo(repo : String, workflows : Hash(String, WorkflowConfig)) : Array(WorkflowPlan)
       validate!(workflows)
       plans = [] of WorkflowPlan
       workflows.each do |key, entry|
         target = self.class.target_path(key)
-        local = read_source(key, entry)
+        local = read_resolved(key, entry)
         local_sha = self.class.blob_sha(local)
         remote = @client.get_contents(repo, target)
         if remote && remote[:sha] == local_sha
@@ -172,6 +259,30 @@ module Gitorules
       rescue ex
         raise "Workflow source not found: #{source} (#{ex.message})"
       end
+    end
+
+    # Reads resolved template content with extra steps applied.
+    #
+    # Base content stays intact; configured `extra_steps` are appended
+    # after the anchor marker. Entries without `extra_steps` return
+    # the base content unchanged.
+    #
+    # @param key [String] Workflow config key (for error messages)
+    # @param entry [WorkflowConfig] Workflow configuration
+    # @return [String] Resolved content to sync
+    # @raise [WorkflowError] On unknown anchor or invalid extra steps
+    # @raise [RuntimeError] When a source file is missing or unreadable
+    def read_resolved(key : String, entry : WorkflowConfig) : String
+      base = read_source(key, entry)
+      extra_path = entry.extra_steps.try(&.strip)
+      return base if extra_path.nil? || extra_path.empty?
+
+      begin
+        extra = File.read(extra_path)
+      rescue ex
+        raise "Workflow extra_steps not found: #{extra_path} (#{ex.message})"
+      end
+      self.class.apply_extra_steps(base, extra, self.class.extra_anchor(entry))
     end
   end
 end
