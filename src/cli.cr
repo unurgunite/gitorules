@@ -51,11 +51,11 @@ module Gitorules
         help_text = parser.to_s
         parser.banner = "Usage: gitorules <status|apply|diff|init|lint|migrate> [options]\n\nCommands:\n"
 
-        parser.on("status", "Show ruleset status for repositories") do
+        parser.on("status", "Show branch status for repositories") do
           options.mode = "status"
         end
 
-        parser.on("apply", "Apply ruleset configuration from .gitorules.yml") do
+        parser.on("apply", "Apply branch configuration from .gitorules.yml") do
           options.mode = "apply"
         end
 
@@ -63,7 +63,7 @@ module Gitorules
           options.mode = "diff"
         end
 
-        parser.on("init", "Generate .gitorules.yml from existing rulesets") do
+        parser.on("init", "Generate .gitorules.yml from existing branch rules") do
           options.mode = "init"
         end
 
@@ -231,9 +231,9 @@ module Gitorules
         end
       end
 
-      if only_set && !only_set.includes?("branch") && !only_set.includes?("labels")
+      if nothing_to_do?(only_set)
         unless options.quiet?
-          STDOUT.puts "Skipped branch rules and labels (--only #{options.only}). Nothing to do."
+          STDOUT.puts "Skipped branch, labels and workflows (--only #{options.only}). Nothing to do."
         end
         return 0
       end
@@ -243,6 +243,16 @@ module Gitorules
       repos, scope_groups = resolve_repos(loader, options)
 
       execute_command(engine, repos, options, STDOUT, input_io, scope_groups)
+    end
+
+    # True when an `--only` filter selects none of the known subsystems.
+    #
+    # Valid values are `branch`, `labels` and `workflows`. A validated
+    # set always contains at least one of them, so this is only a safety
+    # net for empty or future values.
+    private def self.nothing_to_do?(only_set : Set(String)?) : Bool
+      return false unless only_set
+      !only_set.includes?("branch") && !only_set.includes?("labels") && !only_set.includes?("workflows")
     end
 
     private def self.build_client(options : Options) : GitHubClient

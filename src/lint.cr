@@ -24,7 +24,7 @@ module Gitorules
   class Linter
     CHECK_RUNS_CMD    = "gh api repos/<org>/<repo>/commits/HEAD/check-runs --jq '.check_runs[].name'"
     VALID_RULE_FIELDS = %w[merge squash rebase name pattern checks linear_history delete_branch]
-    VALID_TOP_LEVEL   = %w[org repos rules orgs defaults scopes]
+    VALID_TOP_LEVEL   = %w[org repos rules orgs defaults scopes labels labels_sync workflows]
 
     # Lints a config file. Prints errors and warnings.
     #
@@ -308,7 +308,7 @@ module Gitorules
           next
         end
         if glob_check?(text)
-          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating rulesets. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
+          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating branch rules. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
           next
         end
         unless text.includes?("/")

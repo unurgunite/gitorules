@@ -41,6 +41,7 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Allowlist](#allowlist)
     * [Behavior](#behavior)
     * [Token scopes](#token-scopes)
+    * [Stack presets](#stack-presets)
 * [JSON output](#json-output)
 * [Development](#development)
 * [Contributing](#contributing)
@@ -95,10 +96,10 @@ gitorules <status|apply|diff|init|lint|migrate> [options]
 
 | Command   | Description                                       |
 |-----------|---------------------------------------------------|
-| `status`  | Show ruleset status for repositories              |
-| `apply`   | Apply ruleset configuration from `.gitorules.yml` |
+| `status`  | Show branch status for repositories               |
+| `apply`   | Apply branch configuration from `.gitorules.yml`  |
 | `diff`    | Show pending changes without applying             |
-| `init`    | Generate `.gitorules.yml` from existing rulesets  |
+| `init`    | Generate `.gitorules.yml` from existing branch rules |
 | `lint`    | Validate config schema and values (offline)       |
 | `migrate` | Convert legacy config to `defaults`/`scopes` shape |
 
@@ -130,7 +131,7 @@ scripts/automation.
 
 ### Exit codes
 
-- **0** — all rulesets are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
+- **0** — all branch rules are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
   For `migrate`: migration succeeded. For `status`/`diff`/`apply`, see below
 - **1** — changes detected (in `diff` mode) or changes were applied (in `apply` mode). Also returned when the
   confirmation prompt is declined (changes exist but were skipped)
@@ -478,6 +479,47 @@ Workflow sync needs `contents:write` (covered by the classic `repo` scope).
 For fine-grained tokens, grant **Contents** read and write on the managed
 repositories.
 
+### Stack presets
+
+Stack presets map one template pack to one scope. Each scope declares its own
+`workflows` entry pointing at the stack template:
+
+```yaml
+defaults:
+  rules:
+    default_branch:
+      merge: only
+  labels:
+    - name: bug
+      color: d73a4a
+      description: Something is broken
+    - name: enhancement
+      color: a2eeef
+      description: New feature or request
+
+scopes:
+  ruby-gems:
+    repos:
+      - unurgunite/docscribe
+      - unurgunite/genius-api
+    workflows:
+      ci.yml:
+        source: templates/ruby/ci.yml
+  crystal-shards:
+    repos:
+      - unurgunite/gitorules
+      - unurgunite/catalyst
+```
+
+The Ruby pack (`templates/ruby/ci.yml`) provides bundler cache, RuboCop style
+check, and RSpec across Ruby 3.1–3.4 in a single `test` job, so check contexts
+stay stable (`CI / test`). Run a preset with `--scope`:
+
+```shell
+gitorules diff --scope ruby-gems
+gitorules apply --scope ruby-gems --yes
+```
+
 ### Labels
 Labels apply to every managed repository selected for the run.
 
@@ -523,7 +565,7 @@ a missing description and an empty description are treated as equal.
 
 #### Token scopes
 
-Label sync uses the same authentication as rulesets: a Personal
+Label sync uses the same authentication as branch rules: a Personal
 Access Token with `repo` and `read:org` scopes (or `GITHUB_TOKEN`
 with those scopes). No additional scopes are required.
 
