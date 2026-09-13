@@ -3,7 +3,7 @@
 <p align="center">
 <a href="https://github.com/unurgunite/gitorules/actions"><img src="https://github.com/unurgunite/gitorules/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
 <a href="https://github.com/unurgunite/gitorules/blob/master/LICENSE"><img src="https://img.shields.io/github/license/unurgunite/gitorules.svg" alt="License"></a>
-<a href="https://crystal-lang.org"><img src="https://img.shields.io/badge/crystal-%3E%3D%201.14-blue.svg" alt="Crystal"></a>
+<a href="https://crystal-lang.org"><img src="https://img.shields.io/badge/crystal-%3E%3D%201.21-blue.svg" alt="Crystal"></a>
 </p>
 
 Declarative GitHub Ruleset Manager.
@@ -73,7 +73,7 @@ shards install
 crystal build src/gitorules.cr --release -o gitorules
 ```
 
-Requires Crystal 1.14+.
+Requires Crystal 1.21+.
 
 ## CLI
 
