@@ -53,5 +53,11 @@ jobs:
           shards build ameba
           bin/ameba
 
+      - name: Lint example config
+        if: runner.os != 'Windows' && matrix.crystal == '1.21.0'
+        run: |
+          crystal build src/gitorules.cr -o gitorules
+          ./gitorules lint --config .gitorules.yml.example
+
       - name: Test
         run: crystal spec

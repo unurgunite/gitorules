@@ -652,7 +652,9 @@ workflows:
 ### Stack presets
 
 Stack presets map one template pack to one scope. Each scope declares its own
-`workflows` entry pointing at the stack template:
+`workflows` entry pointing at the stack template. A complete working example
+ships as `.gitorules.yml.example` — copy it to `.gitorules.yml` and adapt the
+repo lists to your fleet:
 
 ```yaml
 defaults:

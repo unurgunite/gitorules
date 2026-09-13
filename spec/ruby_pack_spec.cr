@@ -152,9 +152,9 @@ module Gitorules
       end
     end
 
-    describe "dogfood config" do
+    describe "example config" do
       it "parses defaults with ruby-gems and crystal-shards scopes" do
-        path = File.join(__DIR__, "..", ".gitorules.yml")
+        path = File.join(__DIR__, "..", ".gitorules.yml.example")
         File.exists?(path).should be_true
         config = Config.from_yaml(File.read(path))
         resolver = ScopeResolver.new(config)
@@ -168,8 +168,8 @@ module Gitorules
       end
 
       it "passes lint clean" do
-        path = File.join(__DIR__, "..", ".gitorules.yml")
-        result = Linter.lint_content(File.read(path), ".gitorules.yml")
+        path = File.join(__DIR__, "..", ".gitorules.yml.example")
+        result = Linter.lint_content(File.read(path), ".gitorules.yml.example")
         result.errors.should be_empty
       end
     end

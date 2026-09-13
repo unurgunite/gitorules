@@ -1,10 +1,13 @@
-# Dogfood configuration for gitorules itself.
+# Example gitorules configuration.
+#
+# Copy to `.gitorules.yml` and adapt the repo lists to your fleet:
+#   cp .gitorules.yml.example .gitorules.yml
 #
 # Usage:
-#   gitorules status --scope ruby-gems
-#   gitorules diff --scope ruby-gems
-#   gitorules diff --scope crystal-shards
 #   gitorules lint --config .gitorules.yml
+#   gitorules status --scope ruby-gems --config .gitorules.yml
+#   gitorules diff --scope ruby-gems --config .gitorules.yml
+#   gitorules diff --scope crystal-shards --config .gitorules.yml
 
 defaults:
   rules:
