@@ -35,6 +35,20 @@ module Gitorules
         rules.each { |name, rule| rule.validate!(name) }
       end
 
+      if defaults = @config.defaults
+        if default_rules = defaults.rules
+          default_rules.each { |name, rule| rule.validate!("defaults.#{name}") }
+        end
+      end
+
+      if scopes = @config.scopes
+        scopes.each do |scope_name, scope_config|
+          if scope_rules = scope_config.rules
+            scope_rules.each { |name, rule| rule.validate!("#{scope_name}.#{name}") }
+          end
+        end
+      end
+
       if orgs = @config.orgs
         orgs.each do |org_name, org_config|
           if org_rules = org_config.rules
@@ -52,6 +66,28 @@ module Gitorules
         rules.each do |name, rule|
           unless rule.validate_merge_methods!
             raise "rules.#{name}: conflicting merge methods detected"
+          end
+        end
+      end
+
+      if defaults = @config.defaults
+        if default_rules = defaults.rules
+          default_rules.each do |name, rule|
+            unless rule.validate_merge_methods!
+              raise "defaults.#{name}: conflicting merge methods detected"
+            end
+          end
+        end
+      end
+
+      if scopes = @config.scopes
+        scopes.each do |scope_name, scope_config|
+          if scope_rules = scope_config.rules
+            scope_rules.each do |name, rule|
+              unless rule.validate_merge_methods!
+                raise "scopes.#{scope_name}.#{name}: conflicting merge methods detected"
+              end
+            end
           end
         end
       end
@@ -102,6 +138,65 @@ module Gitorules
       raise "No repos or org in config"
     end
 
+    # Returns true when the config uses named scopes.
+    def scoped? : Bool
+      !@config.scopes.nil?
+    end
+
+    # Names of all configured scopes (`["default"]` for legacy configs).
+    def scope_names : Array(String)
+      ScopeResolver.new(@config).scope_names
+    end
+
+    # Repositories belonging to a single scope.
+    #
+    # Glob selectors expand against *available* when given, otherwise
+    # against repositories discovered via the GitHub API. Raises
+    # UnknownScopeError for unknown scope names.
+    def repos_for_scope(name : String, available : Array(String)? = nil) : Array(String)
+      resolver = ScopeResolver.new(@config)
+      resolver.validate_scope!(name)
+
+      scopes = @config.scopes
+      return repo_names unless scopes
+
+      if avail = available
+        return resolver.repos_for_scope(name, avail)
+      end
+
+      scope = scopes[name]
+      patterns = scope.repos || [] of String
+      if patterns.any? { |pattern| ScopeResolver.glob?(pattern) }
+        discovered = discover_for_scope(patterns)
+        combined = (discovered + patterns.reject { |pattern| ScopeResolver.glob?(pattern) }).uniq!
+        return resolver.repos_for_scope(name, combined)
+      end
+
+      resolver.repos_for_scope(name, nil)
+    end
+
+    # Groups repositories by scope, filtered by CLI `--exclude`.
+    #
+    # When *requested* is given, only that scope is returned (raises
+    # UnknownScopeError otherwise). Preserves config scope order.
+    def scope_groups(requested : String?, cli_exclude : Array(String), available : Array(String)? = nil) : Hash(String, Array(String))
+      resolver = ScopeResolver.new(@config)
+      names = if req = requested
+                resolver.validate_scope!(req)
+                [req]
+              else
+                resolver.scope_names
+              end
+
+      groups = {} of String => Array(String)
+      names.each do |scope_name|
+        repos = repos_for_scope(scope_name, available)
+        repos = ScopeResolver.filter_exclude(repos, cli_exclude) unless cli_exclude.empty?
+        groups[scope_name] = repos
+      end
+      groups
+    end
+
     # Fetches repository list from GitHub for the given organization.
     #
     # @param org [String] GitHub organization name
@@ -109,6 +204,29 @@ module Gitorules
     private def discover_repos(org : String) : Array(String)
       client = GitHubClient.new(@token)
       client.list_repos(org).map { |name| "#{org}/#{name}" }
+    end
+
+    # Discovers candidate repositories for scope glob expansion.
+    #
+    # Collects repos for every non-glob org prefix found in *patterns*.
+    private def discover_for_scope(patterns : Array(String)) : Array(String)
+      orgs = patterns.compact_map do |pattern|
+        parts = pattern.split("/")
+        next nil if parts.size < 2
+        org = parts.first.strip
+        next nil if org.empty? || ScopeResolver.glob?(org)
+        org
+      end.uniq!
+
+      result = [] of String
+      orgs.each do |org|
+        begin
+          result.concat(discover_repos(org))
+        rescue ex
+          raise "Failed to list repositories for organization '#{org}': #{ex.message}"
+        end
+      end
+      result
     end
   end
 end

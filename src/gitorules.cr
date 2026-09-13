@@ -1,4 +1,5 @@
 require "./types"
+require "./scope"
 require "./github"
 require "./config"
 require "./engine"
