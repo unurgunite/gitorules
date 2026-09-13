@@ -10,6 +10,7 @@ require "./resource"
 require "./resources/branch_rules"
 require "./engine"
 require "./init"
+require "./lint"
 require "./cli"
 
 module Gitorules

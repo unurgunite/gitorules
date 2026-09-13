@@ -18,6 +18,8 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Commands](#commands)
     * [Options](#options)
     * [Exit codes](#exit-codes)
+    * [`gitorules lint`](#gitorules-lint)
+    * [`gitorules migrate`](#gitorules-migrate)
     * [Authentication](#authentication)
 * [Configuration: `.gitorules.yml`](#configuration-gitorulesyml)
     * [File structure](#file-structure)
@@ -58,6 +60,12 @@ gitorules apply
 
 # Generate .gitorules.yml from existing rulesets
 gitorules init --org myorg
+
+# Validate config without calling the API
+gitorules lint
+
+# Convert legacy org/repos/rules to defaults/scopes
+gitorules migrate
 ```
 
 ## Installation
@@ -80,35 +88,40 @@ Requires Crystal 1.21+.
 ## CLI
 
 ```shell
-gitorules <status|apply|diff|init> [options]
+gitorules <status|apply|diff|init|lint|migrate> [options]
 ```
 
 ### Commands
 
-| Command  | Description                                       |
-|----------|---------------------------------------------------|
-| `status` | Show ruleset status for repositories              |
-| `apply`  | Apply ruleset configuration from `.gitorules.yml` |
-| `diff`   | Show pending changes without applying             |
-| `init`   | Generate `.gitorules.yml` from existing rulesets  |
+| Command   | Description                                       |
+|-----------|---------------------------------------------------|
+| `status`  | Show ruleset status for repositories              |
+| `apply`   | Apply ruleset configuration from `.gitorules.yml` |
+| `diff`    | Show pending changes without applying             |
+| `init`    | Generate `.gitorules.yml` from existing rulesets  |
+| `lint`    | Validate config schema and values (offline)       |
+| `migrate` | Convert legacy config to `defaults`/`scopes` shape |
 
 ### Options
 
-| Flag            | Description                                     |
-|-----------------|-------------------------------------------------|
-| `--dry-run`     | Preview apply changes without making them       |
-| `--diff`        | Show pending changes (same as `diff` command)   |
-| `--repo REPO`   | Target a single repository (`owner/name`)       |
-| `--only RESOURCE` | Limit to resource (`rulesets`, `labels`)       |
-| `--org ORG`     | GitHub organization name (for `init`)           |
-| `--json`        | Machine-readable JSON output                    |
-| `--quiet`       | Suppress all output except errors               |
-| `--verbose`     | Show unchanged workflows and detailed output    |
-| `--yes`         | Skip confirmation prompt and apply immediately  |
-| `--token TOKEN` | GitHub personal access token                    |
-| `--config PATH` | Path to config file (default: `.gitorules.yml`) |
-| `--version`     | Show version                                    |
-| `-h`, `--help`  | Show help                                       |
+| Flag            | Description                                          |
+|-----------------|------------------------------------------------------|
+| `--dry-run`     | Preview apply changes without making them            |
+| `--diff`        | Show pending changes (same as `diff` command)        |
+| `--repo REPO`   | Target a single repository (`owner/name`)            |
+| `--scope NAME`  | Only process repositories in this scope             |
+| `--only LIST`   | Only process subsystems (`branch,labels,workflows`)  |
+| `--exclude REPO`| Exclude repository (repeatable)                      |
+| `--org ORG`     | GitHub organization name (for `init`)                |
+| `--in-place`    | Overwrite config file in place (`migrate` only)      |
+| `--json`        | Machine-readable JSON output                         |
+| `--quiet`       | Suppress all output except errors                    |
+| `--verbose`     | Show unchanged workflows and detailed output         |
+| `--yes`         | Skip confirmation prompt and apply immediately       |
+| `--token TOKEN` | GitHub personal access token                         |
+| `--config PATH` | Path to config file (default: `.gitorules.yml`)      |
+| `--version`     | Show version                                         |
+| `-h`, `--help`  | Show help                                            |
 
 **Apply confirmation:**
 
@@ -117,10 +130,52 @@ scripts/automation.
 
 ### Exit codes
 
-- **0** — all rulesets are up to date (no changes needed)
+- **0** — all rulesets are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
+  For `migrate`: migration succeeded. For `status`/`diff`/`apply`, see below
 - **1** — changes detected (in `diff` mode) or changes were applied (in `apply` mode). Also returned when the
   confirmation prompt is declined (changes exist but were skipped)
-- **2** — execution error (config error, API error, etc.)
+- **2** — execution error (config error, API error, etc.). For `lint`: schema or value errors found.
+  For `migrate`: read, parse, or schema error
+
+### `gitorules lint`
+
+Validates `.gitorules.yml` offline (no API calls, no token required).
+Every error states what is wrong, where (file and key), and how to fix it.
+
+```shell
+gitorules lint --config .gitorules.yml
+```
+
+Checks include:
+
+- merge methods must be the string `only` — `merge: true` is an error, not silently ignored
+- at most one of `merge`/`squash`/`rebase` may be `only`
+- `checks` must be a non-empty list of strings
+- check names without a `Workflow / job` separator produce a warning; verify real names with
+  `gh api repos/<org>/<repo>/commits/HEAD/check-runs`
+- check patterns with glob characters (`*`, `?`, `[`) produce a warning: they match locally
+  and are skipped when creating rulesets
+
+Exit codes: **0** when the file is valid (warnings allowed), **2** on any error.
+
+### `gitorules migrate`
+
+Converts a legacy `org`/`repos`/`rules` (or `orgs`) config to the `defaults`/`scopes` shape:
+
+```shell
+# Print migrated YAML to stdout (source file untouched)
+gitorules migrate --config .gitorules.yml
+
+# Rewrite the source file
+gitorules migrate --config .gitorules.yml --in-place
+```
+
+Single-org input moves shared rules to `defaults` and repositories to `scopes.main`
+(short names expand to full `org/name` entries; bare `org` without `repos` becomes `org/*`).
+Multi-org input becomes one scope per organization. Input already using `scopes`
+is returned unchanged.
+
+Exit codes: **0** on success, **2** on read, parse, or schema errors.
 
 ### Authentication
 
