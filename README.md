@@ -34,6 +34,7 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Config lookup logic](#config-lookup-logic)
     * [`gitorules status` output](#gitorules-status-output)
     * [Labels](#labels)
+* [JSON output](#json-output)
 * [Development](#development)
 * [Contributing](#contributing)
 * [License](#license)
@@ -435,13 +436,66 @@ gitorules apply --only labels --yes
 gitorules status --only labels
 ```
 
-Use `--only rulesets` to skip labels. `gitorules apply --dry-run`
+Use `--only branch` to skip labels. `gitorules apply --dry-run`
 performs zero writes for labels: creations, updates, and prune
 deletions are only reported.
 
 In JSON output (`--json`), each label change is an entry shaped
 `{repo, resource, action, changes[]}` with `resource: "labels"`
 and `action` one of `create`, `update`, `orphan`, `unchanged`.
+
+## JSON output
+
+`--json` emits machine-readable JSON with a unified entry shape across
+`status`, `diff` and `apply`. Every per-resource entry carries:
+
+| Field      | Type       | Description                                              |
+|------------|------------|----------------------------------------------------------|
+| `repo`     | `string`   | Full repository name (`owner/name`)                      |
+| `resource` | `string`   | Ruleset display name (empty for repo-level errors)       |
+| `action`   | `string`   | One of `create`, `update`, `unchanged`, `orphan`, `skip`, `error` |
+| `changes`  | `[string]` | Human-readable differences (empty when none)             |
+
+Legacy fields (`types`, `changes`, `results`, `name`, `exists`,
+`merge_method_ok`, `checks_ok`, `error`) are kept for compatibility.
+
+### Actions
+
+- `create` — ruleset is missing and would be created.
+- `update` — ruleset exists but differs from config.
+- `unchanged` — ruleset matches config.
+- `orphan` — ruleset exists on GitHub but has no matching branch type in config (diff only).
+- `skip` — repo has no configured rules (unknown org in multi-org mode).
+- `error` — API request failed; the entry also carries an `error` message field.
+
+### Examples
+
+```shell
+gitorules status --json | jq '.[0].types.default_branch | {resource, action, changes}'
+# {"resource":"master","action":"unchanged","changes":[]}
+
+gitorules diff --json | jq '.[0].changes[] | {resource, action, changes}'
+# {"resource":"master","action":"create","changes":[]}
+
+gitorules apply --json --dry-run | jq '.[0].results[] | {resource, action, changes}'
+```
+
+### CI usage
+
+```yaml
+- name: Check rulesets
+  run: |
+    gitorules diff --json > diff.json
+    if jq -e '[.[].changes[]? | select(.action == "create" or .action == "update")] | length > 0' diff.json > /dev/null; then
+      echo "Ruleset drift detected"
+      jq -r '.[] | select(.action == "error") | "\(.repo): \(.error)"' diff.json
+      exit 1
+    fi
+```
+
+Performance notes: repository listing follows GitHub `Link` pagination,
+per-repo work runs in a bounded fiber pool (size 10, ordered output),
+and API requests retry with exponential backoff on `429` and `5xx`.
 
 ## Development
 
