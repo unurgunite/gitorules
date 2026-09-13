@@ -679,7 +679,16 @@ module Gitorules
           when "unchanged"
             io.puts "  #{diff_unchanged("workflow '#{plan.target}' up to date", io)}" if verbose && !quiet
           end
+          report_workflow_pin(plan, io, quiet, verbose)
         end
+      end
+
+      # Reports remote pin resolution in verbose mode for auditability.
+      private def report_workflow_pin(plan : WorkflowPlan, io : IO, quiet : Bool, verbose : Bool) : Nil
+        return if quiet
+        return unless verbose
+        return unless plan.remote?
+        io.puts "    source '#{plan.source}' resolved sha #{plan.resolved_sha}"
       end
 
       private def render_text_entry(entry : DiffEntry, io : IO, quiet : Bool = false)
@@ -808,6 +817,9 @@ module Gitorules
           json.field "action", plan.action
           json.field "name", plan.target
           json.field "changes", [] of String
+          json.field "source", plan.source unless plan.source.empty?
+          json.field "resolved_sha", plan.resolved_sha if plan.resolved_sha
+          json.field "ref", plan.remote_ref if plan.remote_ref
           json.field "dry_run", true if dry_run
         end
       end
