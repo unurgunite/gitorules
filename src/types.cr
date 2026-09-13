@@ -182,6 +182,36 @@ struct OrgConfig
   property rules : Hash(String, BranchRuleConfig)?
 end
 
+# A single GitHub issue label.
+#
+# Maps to the GitHub Labels API resource. Only the fields managed
+# by gitorules are modeled; extra API fields are ignored on parse
+# and never sent on create/update.
+struct Label
+  include JSON::Serializable
+  include YAML::Serializable
+
+  # Label name (unique per repository).
+  property name : String = ""
+  # Hex color without leading `#` (e.g. `d73a4a`).
+  property color : String = ""
+  # Optional short description.
+  property description : String? = nil
+
+  def initialize(@name : String = "", @color : String = "", @description : String? = nil)
+  end
+
+  # Normalized color for comparison (strips `#`, lowercases).
+  def norm_color : String
+    color.lchop('#').downcase
+  end
+
+  # Normalized description for comparison (nil and blank are equal).
+  def norm_description : String
+    (description || "").strip
+  end
+end
+
 # Top-level `.gitorules.yml` configuration.
 struct Config
   include YAML::Serializable
@@ -197,6 +227,10 @@ struct Config
   property rules : Hash(String, BranchRuleConfig)?
   # Multi-org configuration (overrides single-org fields).
   property orgs : Hash(String, OrgConfig)?
+  # Wanted issue labels applied to every managed repository.
+  property labels : Array(Label)?
+  # Orphan handling for labels: prune|warn|ignore (default warn).
+  property labels_sync : String?
 
   # Returns rules for a specific repo, considering multi-org config.
   #
@@ -251,6 +285,8 @@ struct Options
   property installation_id : String? = nil
   # GitHub organization name.
   property org : String? = nil
+  # Limit run to a single resource (rulesets, labels).
+  property only : String? = nil
 
   def initialize
   end

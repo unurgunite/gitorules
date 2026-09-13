@@ -8,17 +8,27 @@ module Gitorules
     def initialize(@client : GitHubClient, @config : Config)
     end
 
-    def status(repos : Array(String), quiet : Bool = false, io : IO = STDOUT)
+    def status(repos : Array(String), quiet : Bool = false, io : IO = STDOUT, only : String? = nil)
       types = @config.all_type_keys
-      status_print_header(types, io) unless quiet
+      status_print_header(types, io) unless quiet || only == "labels"
       errors = 0
       repos.each_with_index do |repo, i|
         prefix = "[#{i + 1}/#{repos.size}] "
-        begin
-          status_repo_line(repo, types, io, prefix, quiet)
-        rescue ex
-          io.puts error_io_line(repo, types, prefix, io) unless quiet
-          errors += 1
+        unless only == "labels"
+          begin
+            status_repo_line(repo, types, io, prefix, quiet)
+          rescue ex
+            io.puts error_io_line(repo, types, prefix, io) unless quiet
+            errors += 1
+          end
+        end
+        if labels_configured? && only != "rulesets"
+          begin
+            label_resource.status(repo, quiet, io, prefix)
+          rescue ex
+            io.puts "#{prefix}#{repo}: labels Error: #{ex.message}" unless quiet
+            errors += 1
+          end
         end
       end
       n = repos.size
@@ -100,32 +110,42 @@ module Gitorules
       end
     end
 
-    def status_json(repos : Array(String), io : IO = STDOUT)
+    def status_json(repos : Array(String), io : IO = STDOUT, only : String? = nil)
       types = @config.all_type_keys
       io.puts(JSON.build do |json|
         json.array do
           repos.each do |repo|
             json.object do
               json.field "repo", repo
-              status_json_repo(json, repo, types)
+              status_json_repo(json, repo, types, only)
             end
           end
         end
       end)
     end
 
-    private def status_json_repo(json : JSON::Builder, repo : String, types : Array(String))
-      rules = @config.rules_for(repo)
-      rulesets = @client.list_rulesets(repo)
-      json.field "types" do
-        json.object do
-          types.each do |type|
-            rule_config = rules.try { |r| r[type] }
-            names = type_match_names(type, rule_config)
-            rs = rulesets.find(&.name.in?(names))
-            json.field type do
-              status_json_type(json, repo, rs, rule_config)
+    private def status_json_repo(json : JSON::Builder, repo : String, types : Array(String), only : String? = nil)
+      unless only == "labels"
+        rules = @config.rules_for(repo)
+        rulesets = @client.list_rulesets(repo)
+        json.field "types" do
+          json.object do
+            types.each do |type|
+              rule_config = rules.try { |r| r[type] }
+              names = type_match_names(type, rule_config)
+              rs = rulesets.find(&.name.in?(names))
+              json.field type do
+                status_json_type(json, repo, rs, rule_config)
+              end
             end
+          end
+        end
+      end
+      if labels_configured? && only != "rulesets"
+        entries = label_resource.diff_entries(repo)
+        json.field "labels" do
+          json.array do
+            entries.each { |e| label_resource.write_json_entry(json, repo, e) }
           end
         end
       end
@@ -179,11 +199,11 @@ module Gitorules
       end
     end
 
-    def diff(repos : Array(String), quiet : Bool = false, io : IO = STDOUT)
+    def diff(repos : Array(String), quiet : Bool = false, io : IO = STDOUT, only : String? = nil)
       repos.each_with_index do |repo, i|
         prefix = "[#{i + 1}/#{repos.size}] "
         begin
-          diff_repo(repo, io, prefix, quiet)
+          diff_repo(repo, io, prefix, quiet, only)
         rescue ex
           io.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
         end
@@ -191,13 +211,13 @@ module Gitorules
       io.puts "Done: #{repos.size} repos processed"
     end
 
-    def diff_json(repos : Array(String), io : IO = STDOUT)
+    def diff_json(repos : Array(String), io : IO = STDOUT, only : String? = nil)
       errors = 0
       io.puts(JSON.build do |json|
         json.array do
           repos.each do |repo|
             begin
-              diff_json_repo(json, repo)
+              diff_json_repo(json, repo, only)
             rescue ex
               json.object do
                 json.field "repo", repo
@@ -210,42 +230,62 @@ module Gitorules
       end)
     end
 
-    private def diff_json_repo(json : JSON::Builder, repo : String)
-      begin
-        existing = @client.list_rulesets(repo)
-      rescue ex
-        json.object do
-          json.field "repo", repo
-          json.field "error", ex.message
+    private def diff_json_repo(json : JSON::Builder, repo : String, only : String? = nil)
+      existing = [] of Ruleset
+      unless only == "labels"
+        begin
+          existing = @client.list_rulesets(repo)
+        rescue ex
+          json.object do
+            json.field "repo", repo
+            json.field "error", ex.message
+          end
+          return
         end
-        return
+      end
+
+      label_entries = [] of LabelChange
+      if labels_configured? && only != "rulesets"
+        begin
+          label_entries = label_resource.diff_entries(repo)
+        rescue ex
+          json.object do
+            json.field "repo", repo
+            json.field "error", ex.message
+          end
+          return
+        end
       end
 
       json.object do
         json.field "repo", repo
         json.field "changes" do
           json.array do
-            matched = Set(String).new
+            unless only == "labels"
+              matched = Set(String).new
 
-            if repo_rules = @config.rules_for(repo)
-              repo_rules.each do |type, config|
-                wanted = build_type_ruleset(type, config)
-                names = type_match_names(type, config)
-                found = existing.find(&.name.in?(names))
-                matched << found.name if found
+              if repo_rules = @config.rules_for(repo)
+                repo_rules.each do |type, config|
+                  wanted = build_type_ruleset(type, config)
+                  names = type_match_names(type, config)
+                  found = existing.find(&.name.in?(names))
+                  matched << found.name if found
 
-                if found
-                  diff_json_update(json, repo, found, wanted, config)
-                else
-                  diff_json_create(json, wanted)
+                  if found
+                    diff_json_update(json, repo, found, wanted, config)
+                  else
+                    diff_json_create(json, wanted)
+                  end
                 end
+              end
+
+              existing.each do |rs|
+                next if rs.name.in?(matched)
+                diff_json_orphan(json, rs.name)
               end
             end
 
-            existing.each do |rs|
-              next if rs.name.in?(matched)
-              diff_json_orphan(json, rs.name)
-            end
+            label_entries.each { |e| label_resource.write_json_entry(json, repo, e) }
           end
         end
       end
@@ -328,39 +368,49 @@ module Gitorules
       end
     end
 
-    private def diff_repo(repo : String, io : IO, prefix : String = "", quiet : Bool = false)
-      begin
-        existing = @client.list_rulesets(repo)
-      rescue ex
-        io.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
-        return
-      end
+    private def diff_repo(repo : String, io : IO, prefix : String = "", quiet : Bool = false, only : String? = nil)
+      unless only == "labels"
+        begin
+          existing = @client.list_rulesets(repo)
+        rescue ex
+          io.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
+          return
+        end
 
-      io.puts "#{prefix}=== #{repo} ===" unless quiet
+        io.puts "#{prefix}=== #{repo} ===" unless quiet
 
-      matched = Set(String).new
+        matched = Set(String).new
 
-      if repo_rules = @config.rules_for(repo)
-        repo_rules.each do |type, config|
-          wanted = build_type_ruleset(type, config)
-          names = type_match_names(type, config)
-          found = existing.find(&.name.in?(names))
-          matched << found.name if found
+        if repo_rules = @config.rules_for(repo)
+          repo_rules.each do |type, config|
+            wanted = build_type_ruleset(type, config)
+            names = type_match_names(type, config)
+            found = existing.find(&.name.in?(names))
+            matched << found.name if found
 
-          if found
-            diff_ruleset_update(repo, found, wanted, config, io, quiet)
-          else
-            diff_ruleset_create(wanted, io, quiet)
+            if found
+              diff_ruleset_update(repo, found, wanted, config, io, quiet)
+            else
+              diff_ruleset_create(wanted, io, quiet)
+            end
           end
         end
+
+        existing.each do |rs|
+          next if rs.name.in?(matched)
+          io.puts "  #{diff_orphan(rs.name, io)}" unless quiet
+        end
+
+        io.puts "" unless quiet
       end
 
-      existing.each do |rs|
-        next if rs.name.in?(matched)
-        io.puts "  #{diff_orphan(rs.name, io)}" unless quiet
+      if labels_configured? && only != "rulesets"
+        begin
+          label_resource.diff(repo, quiet, io, prefix)
+        rescue ex
+          io.puts "#{prefix}#{repo}: labels Error: #{ex.message}" unless quiet
+        end
       end
-
-      io.puts "" unless quiet
     end
 
     private def diff_ruleset_create(wanted : Ruleset, io : IO, quiet : Bool = false)
@@ -456,12 +506,12 @@ module Gitorules
       red("- Orphan ruleset '#{name}'", io)
     end
 
-    def apply(repos : Array(String), dry_run : Bool = false, quiet : Bool = false, io : IO = STDOUT)
+    def apply(repos : Array(String), dry_run : Bool = false, quiet : Bool = false, io : IO = STDOUT, only : String? = nil)
       errors = 0
       repos.each_with_index do |repo, i|
         prefix = "[#{i + 1}/#{repos.size}] "
         begin
-          apply_repo(repo, dry_run, io, prefix, quiet)
+          apply_repo(repo, dry_run, io, prefix, quiet, only)
         rescue ex
           io.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
           errors += 1
@@ -471,13 +521,13 @@ module Gitorules
       io.puts "Done: #{n} repos processed, #{errors} error(s)"
     end
 
-    def apply_json(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT)
+    def apply_json(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT, only : String? = nil)
       errors = 0
       io.puts(JSON.build do |json|
         json.array do
           repos.each do |repo|
             begin
-              apply_json_repo(json, repo, dry_run)
+              apply_json_repo(json, repo, dry_run, only)
             rescue ex
               json.object do
                 json.field "repo", repo
@@ -490,29 +540,48 @@ module Gitorules
       end)
     end
 
-    private def apply_json_repo(json : JSON::Builder, repo : String, dry_run : Bool)
-      begin
-        existing = @client.list_rulesets(repo)
-      rescue ex
-        json.object do
-          json.field "repo", repo
-          json.field "error", ex.message
+    private def apply_json_repo(json : JSON::Builder, repo : String, dry_run : Bool, only : String? = nil)
+      existing = [] of Ruleset
+      unless only == "labels"
+        begin
+          existing = @client.list_rulesets(repo)
+        rescue ex
+          json.object do
+            json.field "repo", repo
+            json.field "error", ex.message
+          end
+          return
         end
-        return
+      end
+
+      label_entries = [] of LabelChange
+      if labels_configured? && only != "rulesets"
+        begin
+          label_entries = label_resource.apply_preview(repo)
+        rescue ex
+          json.object do
+            json.field "repo", repo
+            json.field "error", ex.message
+          end
+          return
+        end
       end
 
       json.object do
         json.field "repo", repo
         json.field "results" do
           json.array do
-            if repo_rules = @config.rules_for(repo)
-              repo_rules.each do |type, config|
-                wanted = build_type_ruleset(type, config)
-                names = type_match_names(type, config)
-                found = existing.find(&.name.in?(names))
-                apply_json_ruleset(json, repo, found, wanted, config, dry_run)
+            unless only == "labels"
+              if repo_rules = @config.rules_for(repo)
+                repo_rules.each do |type, config|
+                  wanted = build_type_ruleset(type, config)
+                  names = type_match_names(type, config)
+                  found = existing.find(&.name.in?(names))
+                  apply_json_ruleset(json, repo, found, wanted, config, dry_run)
+                end
               end
             end
+            label_entries.each { |e| label_resource.write_json_entry(json, repo, e, dry_run) }
           end
         end
       end
@@ -544,16 +613,36 @@ module Gitorules
       end
     end
 
-    private def apply_repo(repo : String, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false)
-      existing = @client.list_rulesets(repo)
+    private def apply_repo(repo : String, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false, only : String? = nil)
+      unless only == "labels"
+        existing = @client.list_rulesets(repo)
 
-      if repo_rules = @config.rules_for(repo)
-        repo_rules.each do |type, config|
-          wanted = build_type_ruleset(type, config)
-          names = type_match_names(type, config)
-          found = existing.find(&.name.in?(names))
-          apply_ruleset(repo, found, wanted, config, dry_run, io, prefix, quiet)
+        if repo_rules = @config.rules_for(repo)
+          repo_rules.each do |type, config|
+            wanted = build_type_ruleset(type, config)
+            names = type_match_names(type, config)
+            found = existing.find(&.name.in?(names))
+            apply_ruleset(repo, found, wanted, config, dry_run, io, prefix, quiet)
+          end
         end
+      end
+
+      if labels_configured? && only != "rulesets"
+        label_resource.apply(repo, dry_run, quiet, io, prefix)
+      end
+    end
+
+    # Builds the label synchronizer for the current config.
+    private def label_resource : LabelResource
+      LabelResource.new(@client, @config)
+    end
+
+    # True when the config declares any labels to sync.
+    private def labels_configured? : Bool
+      if labels = @config.labels
+        !labels.empty?
+      else
+        false
       end
     end
 

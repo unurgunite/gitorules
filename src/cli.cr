@@ -80,6 +80,10 @@ module Gitorules
           options.repo = v
         end
 
+        parser.on("--only RESOURCE", "Limit to resource (rulesets, labels)") do |v|
+          options.only = v
+        end
+
         parser.on("--org ORG", "GitHub organization name (for init)") do |v|
           options.org = v
         end
@@ -139,6 +143,13 @@ module Gitorules
         return 0
       end
 
+      if only = options.only
+        unless only == "rulesets" || only == "labels"
+          STDERR.puts "Error: --only must be rulesets or labels (got #{only.inspect})"
+          raise ExitSignal.new(2)
+        end
+      end
+
       client = build_client(options)
 
       # Handle init separately — no config needed
@@ -154,6 +165,13 @@ module Gitorules
 
       begin
         loader = ConfigLoader.new(config_path, token)
+      rescue ex
+        STDERR.puts "Error loading config: #{ex.message}"
+        raise ExitSignal.new(2)
+      end
+
+      begin
+        LabelsSync.validate!(loader.config)
       rescue ex
         STDERR.puts "Error loading config: #{ex.message}"
         raise ExitSignal.new(2)
@@ -212,9 +230,9 @@ module Gitorules
 
     private def self.cmd_status(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
       if options.json?
-        engine.status_json(repos, io)
+        engine.status_json(repos, io, options.only)
       else
-        engine.status(repos, quiet: options.quiet?, io: io)
+        engine.status(repos, quiet: options.quiet?, io: io, only: options.only)
       end
       0
     end
@@ -222,20 +240,20 @@ module Gitorules
     private def self.cmd_apply(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO) : Int32
       if options.diff?
         if options.json?
-          engine.diff_json(repos, io)
+          engine.diff_json(repos, io, options.only)
         else
-          engine.diff(repos, io: io)
+          engine.diff(repos, io: io, only: options.only)
         end
         return 0
       end
 
       if options.json?
-        engine.apply_json(repos, dry_run: options.dry_run?, io: io)
+        engine.apply_json(repos, dry_run: options.dry_run?, io: io, only: options.only)
         return 0
       end
 
       diff_io = IO::Memory.new
-      engine.diff(repos, io: diff_io)
+      engine.diff(repos, io: diff_io, only: options.only)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 
@@ -248,7 +266,7 @@ module Gitorules
           end
         end
 
-        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, io: io)
+        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, io: io, only: options.only)
         1
       else
         io.puts "no changes" unless options.quiet?
@@ -258,12 +276,12 @@ module Gitorules
 
     private def self.cmd_diff(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
       if options.json?
-        engine.diff_json(repos, io)
+        engine.diff_json(repos, io, options.only)
         return 0
       end
 
       diff_io = IO::Memory.new
-      engine.diff(repos, io: diff_io)
+      engine.diff(repos, io: diff_io, only: options.only)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 

@@ -1,4 +1,5 @@
 require "./types"
+require "./labels"
 require "./github"
 require "./config"
 require "./engine"
