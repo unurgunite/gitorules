@@ -80,6 +80,24 @@ module Gitorules
           options.repo = v
         end
 
+        parser.on("--scope NAME", "Only process repositories in this scope") do |v|
+          options.scope = v
+        end
+
+        parser.on("--only LIST", "Only process subsystems: branch,labels,workflows (comma-separated)") do |v|
+          options.only = v
+        end
+
+        parser.on("--exclude REPO", "Exclude repository (owner/name, repeatable)") do |v|
+          v.split(",").each do |part|
+            repo = part.strip
+            options.exclude << repo unless repo.empty?
+          end
+        end
+
+        parser.on("--verbose", "Show detailed output") do
+          options.verbose = true
+        end
         parser.on("--org ORG", "GitHub organization name (for init)") do |v|
           options.org = v
         end
@@ -143,6 +161,10 @@ module Gitorules
         return 0
       end
 
+      run_with_options(options, config_path, input_io)
+    end
+
+    private def self.run_with_options(options : Options, config_path : String, input_io : IO) : Int32
       client = build_client(options)
 
       # Handle init separately — no config needed
@@ -158,20 +180,43 @@ module Gitorules
 
       begin
         loader = ConfigLoader.new(config_path, token)
+      rescue ex : UnknownScopeError
+        STDERR.puts "Error: #{ex.message}"
+        raise ExitSignal.new(2)
       rescue ex
         STDERR.puts "Error loading config: #{ex.message}"
         raise ExitSignal.new(2)
       end
 
+      begin
+        LabelsSync.validate!(loader.config)
+      rescue ex
+        STDERR.puts "Error loading config: #{ex.message}"
+        raise ExitSignal.new(2)
+      end
+
+      only_set = parse_only_option!(options.only)
+
+      if scope_name = options.scope
+        resolver = ScopeResolver.new(loader.config)
+        unless resolver.has_scope?(scope_name)
+          STDERR.puts "Error: unknown scope '#{scope_name}'. Available scopes: #{resolver.scope_names.join(", ")}. Check the `scopes:` section in your config file or run without --scope to use all scopes."
+          raise ExitSignal.new(2)
+        end
+      end
+
+      if only_set && !only_set.includes?("branch") && !only_set.includes?("labels")
+        unless options.quiet?
+          STDOUT.puts "Skipped branch rules and labels (--only #{options.only}). Nothing to do."
+        end
+        return 0
+      end
+
       engine = Engine.new(client, loader.config)
 
-      repos = if repo = options.repo
-                [repo]
-              else
-                loader.repo_names
-              end
+      repos, scope_groups = resolve_repos(loader, options)
 
-      execute_command(engine, repos, options, STDOUT, input_io)
+      execute_command(engine, repos, options, STDOUT, input_io, scope_groups)
     end
 
     private def self.build_client(options : Options) : GitHubClient
@@ -193,7 +238,51 @@ module Gitorules
       raise ExitSignal.new(2)
     end
 
-    private def self.execute_command(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO = STDIN) : Int32
+    # Resolves target repositories, honoring --repo, --scope and --exclude.
+    #
+    # `--repo` wins as a debug override. With named scopes configured,
+    # returns per-scope groups for grouped output plus a deduped flat list.
+    private def self.resolve_repos(loader : ConfigLoader, options : Options) : Tuple(Array(String), Hash(String, Array(String))?)
+      if repo = options.repo
+        return {[repo], nil}
+      end
+
+      if loader.config.scopes
+        begin
+          groups = loader.scope_groups(options.scope, options.exclude)
+        rescue ex : UnknownScopeError
+          STDERR.puts "Error: #{ex.message}"
+          raise ExitSignal.new(2)
+        rescue ex
+          STDERR.puts "Error resolving scopes: #{ex.message}"
+          raise ExitSignal.new(2)
+        end
+        flat = [] of String
+        groups.each_value do |scope_repos|
+          scope_repos.each { |name| flat << name unless flat.includes?(name) }
+        end
+        return {flat, groups}
+      end
+
+      begin
+        repos = loader.repo_names
+      rescue ex
+        STDERR.puts "Error loading config: #{ex.message}"
+        raise ExitSignal.new(2)
+      end
+      repos = ScopeResolver.filter_exclude(repos, options.exclude) unless options.exclude.empty?
+      {repos, nil}
+    end
+
+    # Parses `--only`, failing fast with exit code 2 on unknown values.
+    private def self.parse_only_option!(raw : String?) : Set(String)?
+      ScopeResolver.parse_only(raw)
+    rescue ex : ArgumentError
+      STDERR.puts "Error: #{ex.message}"
+      raise ExitSignal.new(2)
+    end
+
+    private def self.execute_command(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO = STDIN, groups : Hash(String, Array(String))? = nil) : Int32
       if options.dry_run? && options.mode != "apply"
         STDERR.puts "Warning: --dry-run has no effect on '#{options.mode}' command"
       end
@@ -207,7 +296,7 @@ module Gitorules
       when "apply"
         cmd_apply(engine, repos, options, io, input_io)
       when "diff"
-        cmd_diff(engine, repos, options, io)
+        cmd_diff(engine, repos, options, io, groups)
       else
         STDERR.puts "gitorules: unknown subcommand '#{options.mode}'"
         2
@@ -216,9 +305,9 @@ module Gitorules
 
     private def self.cmd_status(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
       if options.json?
-        engine.status_json(repos, io)
+        engine.status_json(repos, io, options.only)
       else
-        engine.status(repos, quiet: options.quiet?, io: io)
+        engine.status(repos, quiet: options.quiet?, io: io, only: options.only)
       end
       0
     end
@@ -226,20 +315,20 @@ module Gitorules
     private def self.cmd_apply(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO) : Int32
       if options.diff?
         if options.json?
-          engine.diff_json(repos, io)
+          engine.diff_json(repos, io, options.only)
         else
-          engine.diff(repos, verbose: options.verbose?, io: io)
+          engine.diff(repos, verbose: options.verbose?, io: io, only: options.only)
         end
         return 0
       end
 
       if options.json?
-        engine.apply_json(repos, dry_run: options.dry_run?, io: io)
+        engine.apply_json(repos, dry_run: options.dry_run?, io: io, only: options.only)
         return 0
       end
 
       diff_io = IO::Memory.new
-      engine.diff(repos, verbose: options.verbose?, io: diff_io)
+      engine.diff(repos, verbose: options.verbose?, io: diff_io, only: options.only)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 
@@ -252,7 +341,7 @@ module Gitorules
           end
         end
 
-        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, verbose: options.verbose?, io: io)
+        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, verbose: options.verbose?, io: io, only: options.only)
         1
       else
         io.puts "no changes" unless options.quiet?
@@ -263,14 +352,18 @@ module Gitorules
       2
     end
 
-    private def self.cmd_diff(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
+    private def self.cmd_diff(engine : Engine, repos : Array(String), options : Options, io : IO, groups : Hash(String, Array(String))? = nil) : Int32
       if options.json?
-        engine.diff_json(repos, io)
+        engine.diff_json(repos, io, options.only)
         return 0
       end
 
+      if groups && options.repo.nil?
+        return cmd_diff_scoped(engine, groups, options, io)
+      end
+
       diff_io = IO::Memory.new
-      engine.diff(repos, verbose: options.verbose?, io: diff_io)
+      engine.diff(repos, verbose: options.verbose?, io: diff_io, only: options.only)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 
@@ -278,6 +371,62 @@ module Gitorules
     rescue ex : WorkflowError
       STDERR.puts "Error: #{ex.message}"
       2
+    end
+
+    # Scoped diff: grouped by scope with summary counters.
+    #
+    # Headers and counters always print (unless --quiet). Per-repo
+    # details print only with --verbose to keep scoped output concise.
+    private def self.cmd_diff_scoped(engine : Engine, groups : Hash(String, Array(String)), options : Options, io : IO) : Int32
+      total_repos = groups.sum { |_, scope_repos| scope_repos.size }
+      scopes_with_changes = groups.count { |scope_name, scope_repos| diff_one_scope(engine, scope_name, scope_repos, options, io) }
+
+      print_diff_totals(io, options, total_repos, groups.size, scopes_with_changes)
+
+      scopes_with_changes > 0 ? 1 : 0
+    end
+
+    private def self.diff_one_scope(engine : Engine, scope_name : String, scope_repos : Array(String), options : Options, io : IO) : Bool
+      if scope_repos.empty?
+        io.puts "Scope: #{scope_name} (0 repos)" unless options.quiet?
+        return false
+      end
+
+      repo_word = scope_repos.size == 1 ? "repo" : "repos"
+      io.puts "Scope: #{scope_name} (#{scope_repos.size} #{repo_word})" unless options.quiet?
+
+      diff_io = IO::Memory.new
+      engine.diff(scope_repos, io: diff_io, only: options.only)
+      diff_text = diff_io.to_s
+      has_changes = diff_has_changes?(diff_text)
+
+      print_scope_result(io, options, diff_text, scope_repos.size, repo_word, has_changes)
+      has_changes
+    end
+
+    private def self.print_scope_result(io : IO, options : Options, diff_text : String, repo_count : Int32, repo_word : String, has_changes : Bool)
+      if options.verbose?
+        io.print diff_text unless options.quiet?
+        return
+      end
+
+      summary = diff_text.lines.last? || "Done: #{repo_count} repos processed"
+      io.puts summary.strip unless options.quiet?
+      return if options.quiet?
+
+      if has_changes
+        io.puts "  (#{repo_count} #{repo_word}, changes detected - use --verbose for details)"
+      else
+        io.puts "  (no changes)"
+      end
+    end
+
+    private def self.print_diff_totals(io : IO, options : Options, total_repos : Int32, scope_count : Int32, scopes_with_changes : Int32)
+      return if options.quiet?
+
+      total_word = total_repos == 1 ? "repo" : "repos"
+      scope_word = scope_count == 1 ? "scope" : "scopes"
+      io.puts "Total: #{total_repos} #{total_word} in #{scope_count} #{scope_word}, #{scopes_with_changes} with changes"
     end
 
     private def self.diff_has_changes?(diff_text : String) : Bool

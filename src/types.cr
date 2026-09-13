@@ -197,6 +197,74 @@ struct OrgConfig
   property workflows : Hash(String, WorkflowConfig)?
 end
 
+# A single GitHub issue label.
+#
+# Maps to the GitHub Labels API resource. Only the fields managed
+# by gitorules are modeled; extra API fields are ignored on parse
+# and never sent on create/update.
+struct Label
+  include JSON::Serializable
+  include YAML::Serializable
+
+  # Label name (unique per repository).
+  property name : String = ""
+  # Hex color without leading `#` (e.g. `d73a4a`).
+  property color : String = ""
+  # Optional short description.
+  property description : String? = nil
+
+  def initialize(@name : String = "", @color : String = "", @description : String? = nil)
+  end
+
+  # Normalized color for comparison (strips `#`, lowercases).
+  def norm_color : String
+    color.lchop('#').downcase
+  end
+
+  # Normalized description for comparison (nil and blank are equal).
+  def norm_description : String
+    (description || "").strip
+  end
+end
+
+# Named repository group with its own selectors and rules.
+#
+# `repos` holds explicit names or glob selectors (e.g. `unurgunite/*-api`).
+# `exclude` removes repositories from the scope (exact or glob).
+# `rules`, `labels` and `workflows` override `defaults` per field.
+struct ScopeConfig
+  include YAML::Serializable
+
+  def initialize
+  end
+
+  # Repository selectors: exact `owner/name` entries or glob patterns.
+  property repos : Array(String)?
+  # Repositories to exclude from this scope (exact or glob).
+  property exclude : Array(String)?
+  # Map of branch type names to their rule configuration.
+  property rules : Hash(String, BranchRuleConfig)?
+  # Label configuration (reserved for future use).
+  property labels : YAML::Any?
+  # Workflow configuration (reserved for future use).
+  property workflows : YAML::Any?
+end
+
+# Global fallback values merged under every scope.
+struct DefaultsConfig
+  include YAML::Serializable
+
+  def initialize
+  end
+
+  # Fallback branch rules, overridden per scope.
+  property rules : Hash(String, BranchRuleConfig)?
+  # Fallback label configuration (reserved for future use).
+  property labels : YAML::Any?
+  # Fallback workflow configuration (reserved for future use).
+  property workflows : YAML::Any?
+end
+
 # Top-level `.gitorules.yml` configuration.
 struct Config
   include YAML::Serializable
@@ -214,15 +282,28 @@ struct Config
   property workflows : Hash(String, WorkflowConfig)?
   # Multi-org configuration (overrides single-org fields).
   property orgs : Hash(String, OrgConfig)?
+  # Wanted issue labels applied to every managed repository.
+  property labels : Array(Label)?
+  # Orphan handling for labels: prune|warn|ignore (default warn).
+  property labels_sync : String?
+  # Global fallback values merged under every scope.
+  property defaults : DefaultsConfig?
+  # Named scopes (when present, replaces legacy org/orgs lookup).
+  property scopes : Hash(String, ScopeConfig)?
 
   # Returns rules for a specific repo, considering multi-org config.
   #
-  # In single-org mode returns top-level rules.
+  # With `scopes` configured, returns merged `defaults` + owning scope
+  # rules. In single-org mode returns top-level rules.
   # In multi-org mode looks up which org owns the repo.
   #
   # @param repo [String] Full repository name (org/repo)
   # @return [Hash(String, BranchRuleConfig)?] Rules for the repo's org
   def rules_for(repo : String) : Hash(String, BranchRuleConfig)?
+    if scopes
+      return Gitorules::ScopeResolver.new(self).effective_rules(repo)
+    end
+
     return rules if rules # single-org mode
 
     org_name = repo.split("/").first?
@@ -255,6 +336,17 @@ struct Config
 
   # Returns all known type keys across all orgs (for column headers).
   def all_type_keys : Array(String)
+    if scopes = self.scopes
+      keys = [] of String
+      if defaults = self.defaults
+        keys.concat(defaults.rules.try(&.keys) || [] of String)
+      end
+      scopes.each_value do |scope|
+        keys.concat(scope.rules.try(&.keys) || [] of String)
+      end
+      return keys.uniq
+    end
+
     org_keys = orgs.try &.values.flat_map { |o| o.rules.try(&.keys) || [] of String } || [] of String
     (org_keys + (rules.try(&.keys) || [] of String)).uniq
   end
@@ -289,6 +381,14 @@ struct Options
   property installation_id : String? = nil
   # GitHub organization name.
   property org : String? = nil
+  # Restrict processing to a single named scope.
+  property scope : String? = nil
+  # Subsystem filter (comma-separated: branch,labels,workflows).
+  property only : String? = nil
+  # Repositories to exclude (owner/name, exact or glob).
+  property exclude : Array(String) = [] of String
+  # Show detailed output.
+  property? verbose : Bool = false
 
   def initialize
   end
