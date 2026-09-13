@@ -41,6 +41,7 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Allowlist](#allowlist)
     * [Behavior](#behavior)
     * [Token scopes](#token-scopes)
+    * [Node and VSCode stacks](#node-and-vscode-stacks)
 * [JSON output](#json-output)
 * [Development](#development)
 * [Contributing](#contributing)
@@ -477,6 +478,45 @@ exit code 2 before any API write.
 Workflow sync needs `contents:write` (covered by the classic `repo` scope).
 For fine-grained tokens, grant **Contents** read and write on the managed
 repositories.
+
+### Node and VSCode stacks
+
+Two templates cover Node.js projects. Both define a single `test` job —
+the job name is part of the GitHub check context, so renaming it changes
+required checks and must stay in sync with branch rules.
+
+- `templates/node/ci.yml` — standard Node CI. Single `test` job on
+  `ubuntu-latest` with a `node-version: [20, 22, 24]` matrix. Installs with
+  `npm ci` (npm cache), then runs eslint, typecheck, and tests.
+  Matrix checks look like `"CI / test (20)"` — verify real names with
+  `gh api repos/<org>/<repo>/commits/HEAD/check-runs`.
+- `templates/node/vscode-ci.yml` — VSCode extension pipeline. Single `test`
+  job on `ubuntu-latest` with a `node-version: [18, 20, 22, 24]` by
+  `vscode-version: [stable, insiders]` matrix. Runs format check
+  (`npm run format:check`), lint, typecheck, compile, then extension tests
+  under `xvfb` with retry (`nick-fields/retry`, 10 minute timeout,
+  2 attempts).
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/node/ci.yml
+  vscode-ci.yml:
+    source: templates/node/vscode-ci.yml
+```
+
+Example branch rules for the standard Node template (matrix jobs produce
+one check per combination):
+
+```yaml
+rules:
+  default_branch:
+    merge: only
+    checks:
+      - "CI / test (20)"
+      - "CI / test (22)"
+      - "CI / test (24)"
+```
 
 ### Labels
 Labels apply to every managed repository selected for the run.
