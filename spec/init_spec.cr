@@ -86,7 +86,7 @@ module Gitorules
         generator.generate([repo], io)
         output = io.to_s
 
-        output.should contain("WARNING: 1 ruleset(s) skipped")
+        output.should contain("WARNING: 1 branch rule(s) skipped")
       end
 
       it "includes skipped count in YAML comment when errors occur" do
@@ -101,7 +101,7 @@ module Gitorules
         generator.generate([repo], io)
         output = io.to_s
 
-        output.should contain("# WARNING: 1 ruleset(s) skipped")
+        output.should contain("# WARNING: 1 branch rule(s) skipped")
       end
 
       it "handles repo with empty rulesets" do
@@ -147,7 +147,7 @@ module Gitorules
         io = IO::Memory.new
         err = IO::Memory.new
         generator.generate([repo], io, err: err)
-        err.to_s.should contain("2 ruleset(s) were skipped")
+        err.to_s.should contain("2 branch rule(s) were skipped")
       end
 
       it "no warning when all fetches succeed" do

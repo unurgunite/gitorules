@@ -1,0 +1,32 @@
+# Dogfood configuration for gitorules itself.
+#
+# Usage:
+#   gitorules status --scope ruby-gems
+#   gitorules diff --scope ruby-gems
+#   gitorules diff --scope crystal-shards
+#   gitorules lint --config .gitorules.yml
+
+defaults:
+  rules:
+    default_branch:
+      merge: only
+  labels:
+    - name: bug
+      color: d73a4a
+      description: Something is broken
+    - name: enhancement
+      color: a2eeef
+      description: New feature or request
+
+scopes:
+  ruby-gems:
+    repos:
+      - unurgunite/docscribe
+      - unurgunite/genius-api
+    workflows:
+      ci.yml:
+        source: templates/ruby/ci.yml
+  crystal-shards:
+    repos:
+      - unurgunite/gitorules
+      - unurgunite/catalyst

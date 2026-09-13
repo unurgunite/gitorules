@@ -15,18 +15,29 @@ module Gitorules
     property target : String
     # Planned action: "create", "update", or "unchanged".
     property action : String
-    # Local template content to write.
+    # Template content to write (local file or remote pin).
     property content : String
     # Blob sha of the existing remote file (nil for creates).
     property sha : String?
+    # Original source string from config.
+    property source : String
+    # Resolved template blob sha (auditable pin resolution).
+    property resolved_sha : String?
+    # Pinned ref for remote sources (nil for local files).
+    property remote_ref : String?
 
-    def initialize(@target : String, @action : String, @content : String, @sha : String?)
+    def initialize(@target : String, @action : String, @content : String, @sha : String?, @source : String = "", @resolved_sha : String? = nil, @remote_ref : String? = nil)
+    end
+
+    # True when the template came from a remote `repo@ref:path` pin.
+    def remote? : Bool
+      !remote_ref.nil?
     end
   end
 
   # Syncs GitHub Actions workflow files via the Contents API.
   #
-  # Config maps a workflow key to a local template source:
+  # Config maps a workflow key to a template source, either local:
   #
   # ```yaml
   # workflows:
@@ -34,13 +45,20 @@ module Gitorules
   #     source: templates/ci.yml
   # ```
   #
-  # Per-repo extension points use an explicit extra-steps file:
+  # Per-repo extension points use an explicit extra-steps file,
+  # or a remote pin:
   #
   # ```yaml
   # workflows:
   #   ci.yml:
   #     source: templates/gradle/ci.yml
   #     extra_steps: templates/gradle/extra-steps.example.yml
+  # ```
+  #
+  # ```yaml
+  # workflows:
+  #   ci.yml:
+  #     source: FlorexLabs/templates@v1:ruby/ci.yml
   # ```
   #
   # Extra steps are appended verbatim after the anchor marker
@@ -55,9 +73,11 @@ module Gitorules
     EXTRA_STEPS_ANCHOR_DEFAULT = "gitorules:extra-steps"
 
     @client : GitHubClient
+    @resolver : TemplateResolver
 
     # @param client [GitHubClient] Authenticated GitHub API client
-    def initialize(@client : GitHubClient)
+    def initialize(@client : GitHubClient, cache_dir : String? = nil)
+      @resolver = TemplateResolver.new(@client, cache_dir)
     end
 
     # Resolves a config key to a repository-relative target path.
@@ -195,10 +215,13 @@ module Gitorules
 
     # Plans workflow sync for a repo without writing.
     #
-    # Compares the local template blob sha against the remote sha:
+    # Compares the template blob sha against the remote sha:
     # equal shas plan "unchanged", missing files plan "create",
-    # differing files plan "update". Local content includes any
+    # differing files plan "update". Resolved content includes any
     # configured `extra_steps` appended at the anchor marker.
+    # Local paths read from disk; `repo@ref:path` pins fetch via the
+    # Contents API with per-run caching, so repeated resolves perform
+    # zero extra HTTP calls.
     #
     # @param repo [String] Full repository name (owner/name)
     # @param workflows [Hash(String, WorkflowConfig)] Configured workflows
@@ -210,15 +233,16 @@ module Gitorules
       plans = [] of WorkflowPlan
       workflows.each do |key, entry|
         target = self.class.target_path(key)
-        local = read_resolved(key, entry)
+        resolved = resolve_entry(key, entry)
+        local = apply_configured_extra_steps(resolved.content, entry)
         local_sha = self.class.blob_sha(local)
         remote = @client.get_contents(repo, target)
         if remote && remote[:sha] == local_sha
-          plans << WorkflowPlan.new(target, "unchanged", local, remote[:sha])
+          plans << WorkflowPlan.new(target, "unchanged", local, remote[:sha], entry.source || "", local_sha, resolved.source.remote? ? resolved.source.ref : nil)
         elsif remote
-          plans << WorkflowPlan.new(target, "update", local, remote[:sha])
+          plans << WorkflowPlan.new(target, "update", local, remote[:sha], entry.source || "", local_sha, resolved.source.remote? ? resolved.source.ref : nil)
         else
-          plans << WorkflowPlan.new(target, "create", local, nil)
+          plans << WorkflowPlan.new(target, "create", local, nil, entry.source || "", local_sha, resolved.source.remote? ? resolved.source.ref : nil)
         end
       end
       plans
@@ -243,22 +267,35 @@ module Gitorules
       plans
     end
 
+    # Resolves the template source for a workflow entry.
+    #
+    # Local paths read from disk with unchanged behavior. Remote
+    # `repo@ref:path` pins fetch via the Contents API with caching.
+    #
+    # @param key [String] Workflow config key (for error messages)
+    # @param entry [WorkflowConfig] Workflow configuration
+    # @return [ResolvedTemplate] Content with blob sha
+    # @raise [RuntimeError] When no source is configured
+    # @raise [WorkflowError] On malformed remote references
+    private def resolve_entry(key : String, entry : WorkflowConfig) : ResolvedTemplate
+      source = entry.source
+      if source.nil? || source.empty?
+        raise "Workflow '#{key}' has no source configured"
+      end
+      @resolver.resolve(source)
+    end
+
     # Reads the local template source for a workflow entry.
+    #
+    # Kept for compatibility; delegates to the resolver so local
+    # behavior stays identical while remote pins resolve via API.
     #
     # @param key [String] Workflow config key (for error messages)
     # @param entry [WorkflowConfig] Workflow configuration
     # @return [String] Template content
     # @raise [RuntimeError] When no source is configured or the file is unreadable
     private def read_source(key : String, entry : WorkflowConfig) : String
-      source = entry.source
-      if source.nil? || source.empty?
-        raise "Workflow '#{key}' has no source configured"
-      end
-      begin
-        File.read(source)
-      rescue ex
-        raise "Workflow source not found: #{source} (#{ex.message})"
-      end
+      resolve_entry(key, entry).content
     end
 
     # Reads resolved template content with extra steps applied.
@@ -273,7 +310,18 @@ module Gitorules
     # @raise [WorkflowError] On unknown anchor or invalid extra steps
     # @raise [RuntimeError] When a source file is missing or unreadable
     def read_resolved(key : String, entry : WorkflowConfig) : String
-      base = read_source(key, entry)
+      resolved = resolve_entry(key, entry)
+      apply_configured_extra_steps(resolved.content, entry)
+    end
+
+    # Appends configured `extra_steps` to base template content.
+    #
+    # @param base [String] Resolved base template content
+    # @param entry [WorkflowConfig] Workflow configuration
+    # @return [String] Content with extra steps, or base unchanged
+    # @raise [WorkflowError] On unknown anchor or invalid extra steps
+    # @raise [RuntimeError] When the extra steps file is unreadable
+    private def apply_configured_extra_steps(base : String, entry : WorkflowConfig) : String
       extra_path = entry.extra_steps.try(&.strip)
       return base if extra_path.nil? || extra_path.empty?
 

@@ -39,12 +39,14 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Labels](#labels)
 * [Workflows sync](#workflows-sync)
     * [Template layout](#template-layout)
+    * [Remote sources and pinning](#remote-sources-and-pinning)
     * [Allowlist](#allowlist)
     * [Behavior](#behavior)
     * [Token scopes](#token-scopes)
     * [Gradle pack](#gradle-pack)
     * [Extension points](#extension-points)
     * [Minimal packs](#minimal-packs)
+    * [Stack presets](#stack-presets)
     * [Node and VSCode stacks](#node-and-vscode-stacks)
 * [JSON output](#json-output)
 * [Development](#development)
@@ -100,10 +102,10 @@ gitorules <status|apply|diff|init|lint|migrate|verify> [options]
 
 | Command   | Description                                       |
 |-----------|---------------------------------------------------|
-| `status`  | Show ruleset status for repositories              |
-| `apply`   | Apply ruleset configuration from `.gitorules.yml` |
+| `status`  | Show branch status for repositories               |
+| `apply`   | Apply branch configuration from `.gitorules.yml`  |
 | `diff`    | Show pending changes without applying             |
-| `init`    | Generate `.gitorules.yml` from existing rulesets  |
+| `init`    | Generate `.gitorules.yml` from existing branch rules |
 | `lint`    | Validate config schema and values (offline)       |
 | `verify`  | Verify required checks are produced by workflows (offline) |
 | `migrate` | Convert legacy config to `defaults`/`scopes` shape |
@@ -136,7 +138,7 @@ scripts/automation.
 
 ### Exit codes
 
-- **0** — all rulesets are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
+- **0** — all branch rules are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
   For `verify`: all required checks are produced (warnings allowed).
   For `migrate`: migration succeeded. For `status`/`diff`/`apply`, see below
 - **1** — changes detected (in `diff` mode) or changes were applied (in `apply` mode). Also returned when the
@@ -494,6 +496,41 @@ Each key is the workflow file name; `source` is the local template path
 `.github/workflows/ci.yml` in every managed repository. Keys that already
 carry the `.github/workflows/` prefix are used as-is.
 
+### Remote sources and pinning
+
+A `source` can also reference a file from another repository with a pin:
+
+```yaml
+workflows:
+  ci.yml:
+    source: FlorexLabs/templates@v1:ruby/ci.yml
+```
+
+The shape is `owner/repo@ref:path`, where `path` is the file inside the
+template repository and `ref` is a tag (e.g. `v1`) or a full 40-hex commit
+SHA (e.g. `9a3b...`). Local paths without `@` keep the previous behavior.
+
+Tag pins track a moving tag; SHA pins are fully reproducible. Prefer SHA
+pins for production fleets and tags for tracking upstream.
+
+Resolution fetches `GET /repos/{repo}/contents/{path}?ref={ref}` with the
+same authentication as other API calls. Downloads cache in memory per run,
+so one pin used by many repos or workflows performs a single fetch.
+Set `GITORULES_CACHE_DIR` to a directory to also cache downloads on disk
+for offline-friendly repeated runs.
+
+Reproducibility is reported, not locked:
+
+- `gitorules diff --verbose` prints the resolved template sha per workflow,
+  e.g. `source 'FlorexLabs/templates@v1:ruby/ci.yml' resolved sha 91acc6...`.
+- JSON output (`diff --json`, `apply --json`) adds `source`, `resolved_sha`
+  (template blob sha) and `ref` fields to each workflow entry.
+
+Design note: resolved-sha reporting was chosen over a `.gitorules.lock`
+lockfile as the smaller fit — it reuses the existing unified JSON contract,
+adds no new file lifecycle or merge conflicts, and the blob sha already
+verifies content equality for the sha-match skip.
+
 ### Allowlist
 
 Only `.github/workflows/*.yml` (or `*.yaml`) targets are allowed — no
@@ -573,6 +610,8 @@ Rules:
 - `extra_steps_anchor` optionally renames the marker (default:
   `gitorules:extra-steps`). A blank anchor is an error.
 - An unknown anchor is an error: the marker must exist in the base file.
+  (For remote `repo@ref:path` bases the marker cannot be checked offline,
+  so the anchor check runs at sync time.)
 - There are no silent full-file overrides. Unknown workflow fields are
   rejected by `gitorules lint`, and missing or invalid extra files fail
   the sync for that repository.
@@ -605,6 +644,47 @@ workflows:
 workflows:
   ci.yml:
     source: templates/shell/ci.yml
+```
+
+### Stack presets
+
+Stack presets map one template pack to one scope. Each scope declares its own
+`workflows` entry pointing at the stack template:
+
+```yaml
+defaults:
+  rules:
+    default_branch:
+      merge: only
+  labels:
+    - name: bug
+      color: d73a4a
+      description: Something is broken
+    - name: enhancement
+      color: a2eeef
+      description: New feature or request
+
+scopes:
+  ruby-gems:
+    repos:
+      - unurgunite/docscribe
+      - unurgunite/genius-api
+    workflows:
+      ci.yml:
+        source: templates/ruby/ci.yml
+  crystal-shards:
+    repos:
+      - unurgunite/gitorules
+      - unurgunite/catalyst
+```
+
+The Ruby pack (`templates/ruby/ci.yml`) provides bundler cache, RuboCop style
+check, and RSpec across Ruby 3.1–3.4 in a single `test` job, so check contexts
+stay stable (`CI / test`). Run a preset with `--scope`:
+
+```shell
+gitorules diff --scope ruby-gems
+gitorules apply --scope ruby-gems --yes
 ```
 
 ### Node and VSCode stacks
@@ -692,7 +772,7 @@ a missing description and an empty description are treated as equal.
 
 #### Token scopes
 
-Label sync uses the same authentication as rulesets: a Personal
+Label sync uses the same authentication as branch rules: a Personal
 Access Token with `repo` and `read:org` scopes (or `GITHUB_TOKEN`
 with those scopes). No additional scopes are required.
 

@@ -381,7 +381,7 @@ module Gitorules
     end
 
     describe "--only filtering" do
-      it "skips rulesets when only labels is set" do
+      it "skips branch when only labels is set" do
         engine = Engine.new(client, labels_config)
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/labels?per_page=100")
           .to_return(body: "[]")
@@ -391,13 +391,13 @@ module Gitorules
         io.to_s.should contain("Create label")
       end
 
-      it "skips labels when only rulesets is set" do
+      it "skips labels when only branch is set" do
         engine = Engine.new(client, labels_config)
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/docscribe/rulesets")
           .to_return(body: "[]")
 
         io = IO::Memory.new
-        engine.diff([repo], io: io, only: "rulesets")
+        engine.diff([repo], io: io, only: "branch")
         io.to_s.should_not contain("label")
       end
 

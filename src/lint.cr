@@ -269,13 +269,23 @@ module Gitorules
 
       source = fields["source"]?.try(&.as_s?).try(&.strip)
       if source.nil? || source.empty?
-        errors << "in #{path} at #{location}.source: a template source is required. Fix: set `source: templates/ci.yml`."
+        errors << "in #{path} at #{location}.source: a template source is required. Fix: set `source: templates/#{key}` or `source: owner/repo@v1:path/to/file.yml`."
         return
       end
 
-      base_content = read_lint_file(source)
-      if base_content.nil?
-        errors << "in #{path} at #{location}.source: file not found '#{source}'. Fix: check the path relative to the current directory."
+      begin
+        parsed_source = TemplateSource.parse(source)
+      rescue ex : WorkflowError
+        errors << "in #{path} at #{location}.source: #{ex.message}. Fix: use a local path or `owner/repo@ref:path`."
+        return
+      end
+
+      base_content = nil
+      unless parsed_source.kind.remote?
+        base_content = read_lint_file(source)
+        if base_content.nil?
+          errors << "in #{path} at #{location}.source: file not found '#{source}'. Fix: check the path relative to the current directory."
+        end
       end
 
       anchor = lint_workflow_anchor(fields, location, path, errors, warnings)
@@ -463,7 +473,7 @@ module Gitorules
           next
         end
         if glob_check?(text)
-          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating rulesets. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
+          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating branch rules. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
           next
         end
         unless text.includes?("/")
