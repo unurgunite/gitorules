@@ -19,6 +19,7 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Options](#options)
     * [Exit codes](#exit-codes)
     * [`gitorules lint`](#gitorules-lint)
+    * [`gitorules verify`](#gitorules-verify)
     * [`gitorules migrate`](#gitorules-migrate)
     * [Authentication](#authentication)
 * [Configuration: `.gitorules.yml`](#configuration-gitorulesyml)
@@ -41,6 +42,7 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Allowlist](#allowlist)
     * [Behavior](#behavior)
     * [Token scopes](#token-scopes)
+    * [Node and VSCode stacks](#node-and-vscode-stacks)
 * [Files sync](#files-sync)
 * [JSON output](#json-output)
     * [Drift gate](#drift-gate)
@@ -90,7 +92,7 @@ Requires Crystal 1.21+.
 ## CLI
 
 ```shell
-gitorules <status|apply|diff|init|lint|migrate> [options]
+gitorules <status|apply|diff|init|lint|migrate|verify> [options]
 ```
 
 ### Commands
@@ -102,6 +104,7 @@ gitorules <status|apply|diff|init|lint|migrate> [options]
 | `diff`    | Show pending changes without applying             |
 | `init`    | Generate `.gitorules.yml` from existing rulesets  |
 | `lint`    | Validate config schema and values (offline)       |
+| `verify`  | Verify required checks are produced by workflows (offline) |
 | `migrate` | Convert legacy config to `defaults`/`scopes` shape |
 
 ### Options
@@ -134,10 +137,12 @@ scripts/automation.
 ### Exit codes
 
 - **0** — all rulesets are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
+  For `verify`: all required checks are produced (warnings allowed).
   For `migrate`: migration succeeded. For `status`/`diff`/`apply`, see below
 - **1** — changes detected (in `diff` mode) or changes were applied (in `apply` mode). Also returned when the
   confirmation prompt is declined (changes exist but were skipped)
 - **2** — execution error (config error, API error, etc.). For `lint`: schema or value errors found.
+  For `verify`: required checks with no producing workflow found.
   For `migrate`: read, parse, or schema error
 
 ### `gitorules lint`
@@ -158,8 +163,35 @@ Checks include:
   `gh api repos/<org>/<repo>/commits/HEAD/check-runs`
 - check patterns with glob characters (`*`, `?`, `[`) produce a warning: they match locally
   and are skipped when creating rulesets
+- every exact required check must be produced by a workflow in the same scope
+  (see [`gitorules verify`](#gitorules-verify)): a stale check such as `check / check`
+  is an error shaped as what is wrong (the check name), where
+  (`rules.<scope>.<type>.checks`), how to fix (rename the check or update the
+  template), plus the list of checks the scope actually produces.
+  A produced job with no matching requirement is a warning, not an error
 
 Exit codes: **0** when the file is valid (warnings allowed), **2** on any error.
+
+### `gitorules verify`
+
+Dry-run report of required-vs-produced checks per scope (offline, no API calls,
+no token required). Reuses the same cross-check core as `lint` without failing
+the schema validation. Accepts both `gitorules verify` and `gitorules scope verify`
+spellings.
+
+```shell
+gitorules verify --config .gitorules.yml
+gitorules scope verify --scope backend --config .gitorules.yml
+gitorules verify --json | jq '.[] | {scope, missing, extra, ok}'
+```
+
+Matrix axes in templates expand to concrete GitHub check names
+(`CI / test (20)`), so comparison is exact, not prefix-based. Both
+`matrix: {key: [values]}` maps and `include:` lists are supported;
+unknown shapes fall back to the plain job name with a warning.
+
+Exit codes: **0** when every required check is produced (warnings allowed),
+**2** on missing checks or read/parse errors.
 
 ### `gitorules migrate`
 
@@ -480,6 +512,45 @@ exit code 2 before any API write.
 Workflow sync needs `contents:write` (covered by the classic `repo` scope).
 For fine-grained tokens, grant **Contents** read and write on the managed
 repositories.
+
+### Node and VSCode stacks
+
+Two templates cover Node.js projects. Both define a single `test` job —
+the job name is part of the GitHub check context, so renaming it changes
+required checks and must stay in sync with branch rules.
+
+- `templates/node/ci.yml` — standard Node CI. Single `test` job on
+  `ubuntu-latest` with a `node-version: [20, 22, 24]` matrix. Installs with
+  `npm ci` (npm cache), then runs eslint, typecheck, and tests.
+  Matrix checks look like `"CI / test (20)"` — verify real names with
+  `gh api repos/<org>/<repo>/commits/HEAD/check-runs`.
+- `templates/node/vscode-ci.yml` — VSCode extension pipeline. Single `test`
+  job on `ubuntu-latest` with a `node-version: [18, 20, 22, 24]` by
+  `vscode-version: [stable, insiders]` matrix. Runs format check
+  (`npm run format:check`), lint, typecheck, compile, then extension tests
+  under `xvfb` with retry (`nick-fields/retry`, 10 minute timeout,
+  2 attempts).
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/node/ci.yml
+  vscode-ci.yml:
+    source: templates/node/vscode-ci.yml
+```
+
+Example branch rules for the standard Node template (matrix jobs produce
+one check per combination):
+
+```yaml
+rules:
+  default_branch:
+    merge: only
+    checks:
+      - "CI / test (20)"
+      - "CI / test (22)"
+      - "CI / test (24)"
+```
 
 ### Labels
 Labels apply to every managed repository selected for the run.
