@@ -38,21 +38,22 @@ module Gitorules
     end
 
     describe "--only vocabulary lock" do
-      it "accepts only branch, labels and workflows" do
-        ScopeResolver::VALID_ONLY_VALUES.should eq ["branch", "labels", "workflows"]
+      it "accepts only branch, labels, workflows and files" do
+        ScopeResolver::VALID_ONLY_VALUES.should eq ["branch", "labels", "workflows", "files"]
         ScopeResolver::VALID_ONLY_VALUES.should_not contain "rulesets"
       end
 
-      it "parses branch, labels and workflows combinations" do
+      it "parses branch, labels, workflows and files combinations" do
         ScopeResolver.parse_only("branch").should eq Set{"branch"}
         ScopeResolver.parse_only("labels").should eq Set{"labels"}
         ScopeResolver.parse_only("workflows").should eq Set{"workflows"}
+        ScopeResolver.parse_only("files").should eq Set{"files"}
         ScopeResolver.parse_only("branch,labels").should eq Set{"branch", "labels"}
         ScopeResolver.parse_only("branch,labels,workflows").should eq Set{"branch", "labels", "workflows"}
       end
 
       it "rejects the legacy rulesets value" do
-        expect_raises(ArgumentError, /Valid values: branch, labels, workflows/) do
+        expect_raises(ArgumentError, /Valid values: branch, labels, workflows, files/) do
           ScopeResolver.parse_only("rulesets")
         end
         expect_raises(ArgumentError, /Valid values/) do

@@ -198,8 +198,21 @@ module Gitorules
         !workflows_skipped?(only)
       end
 
+      # True when generic file work must be skipped for an `only` filter.
+      private def files_skipped?(only : String?) : Bool
+        parts = only_parts(only)
+        return false if parts.nil?
+        !parts.includes?("files")
+      end
+
+      # True when generic file sync is wanted for an `only` filter.
+      private def files_wanted?(only : String?) : Bool
+        !files_skipped?(only)
+      end
+
       def diff(repos : Array(String), quiet : Bool = false, io : IO = STDOUT, only : String? = nil, verbose : Bool = false)
         validate_workflows!(repos)
+        validate_files!(repos)
         total = repos.size
         is_tty = colorize?(io)
         outputs = Concurrent.map_ordered(repos) do |repo, idx|
@@ -224,8 +237,17 @@ module Gitorules
         WorkflowResource.new(@client).validate_all!(@config, repos)
       end
 
+      # Validates generic file config for all repos before any API write.
+      #
+      # Raises `FileSyncError` (a WorkflowError, CLI maps it to exit 2)
+      # when a target path falls outside the file allowlist.
+      private def validate_files!(repos : Array(String))
+        FileResource.new(@client).validate_all!(@config, repos)
+      end
+
       def diff_json(repos : Array(String), io : IO = STDOUT, only : String? = nil)
         validate_workflows!(repos)
+        validate_files!(repos)
         results = Concurrent.map_ordered(repos) do |repo, _idx|
           diff_repo_json_string(repo, only)
         end
@@ -263,6 +285,7 @@ module Gitorules
 
       def apply(repos : Array(String), dry_run : Bool = false, quiet : Bool = false, io : IO = STDOUT, only : String? = nil, verbose : Bool = false)
         validate_workflows!(repos)
+        validate_files!(repos)
         total = repos.size
         is_tty = colorize?(io)
         outputs = Concurrent.map_ordered(repos) do |repo, idx|
@@ -288,6 +311,7 @@ module Gitorules
 
       def apply_json(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT, only : String? = nil)
         validate_workflows!(repos)
+        validate_files!(repos)
         results = Concurrent.map_ordered(repos) do |repo, _idx|
           apply_repo_json_string(repo, dry_run, only)
         end
@@ -636,6 +660,7 @@ module Gitorules
         diff_repo_rulesets(repo, io, prefix, quiet) unless branch_skipped?(only)
         diff_repo_labels(repo, io, prefix, quiet) if labels_wanted?(only)
         diff_repo_workflows(repo, io, quiet, verbose) if workflows_wanted?(only)
+        diff_repo_files(repo, io, quiet, verbose) if files_wanted?(only)
       end
 
       private def diff_repo_rulesets(repo : String, io : IO, prefix : String, quiet : Bool)
@@ -683,6 +708,23 @@ module Gitorules
         end
       end
 
+      # Prints pending generic file changes for a repo (no writes).
+      private def diff_repo_files(repo : String, io : IO, quiet : Bool, verbose : Bool)
+        files = @config.files_for(repo)
+        return if files.nil? || files.empty?
+        plans = FileResource.new(@client).plan_repo(repo, files)
+        plans.each do |plan|
+          case plan.action
+          when "create"
+            io.puts "  #{diff_add("Create file '#{plan.target}'", io)}" unless quiet
+          when "update"
+            io.puts "  #{diff_change("Update file '#{plan.target}'", io)}" unless quiet
+          when "unchanged"
+            io.puts "  #{diff_unchanged("file '#{plan.target}' up to date", io)}" if verbose && !quiet
+          end
+        end
+      end
+
       # Reports remote pin resolution in verbose mode for auditability.
       private def report_workflow_pin(plan : WorkflowPlan, io : IO, quiet : Bool, verbose : Bool) : Nil
         return if quiet
@@ -727,6 +769,7 @@ module Gitorules
               render_diff_branch_entries(json, repo, existing, only) unless branch_skipped?(only)
               label_entries.each { |e| label_resource.write_json_entry(json, repo, e) }
               render_diff_workflow_entries(json, repo, only) if workflows_wanted?(only)
+              render_diff_file_entries(json, repo, only) if files_wanted?(only)
             end
           end
         end
@@ -799,6 +842,25 @@ module Gitorules
         workflows = @config.workflows_for(repo)
         return if workflows.nil? || workflows.empty?
         plans = WorkflowResource.new(@client).plan_repo(repo, workflows)
+        plans.each do |plan|
+          write_workflow_json_entry(json, plan)
+        end
+      rescue ex
+        json.object do
+          json.field "resource", ""
+          json.field "action", "error"
+          json.field "changes", [] of String
+          json.field "error", ex.message
+        end
+      end
+
+      # Appends generic file plans to a diff JSON changes array.
+      #
+      # Report-only: plans are computed via GETs, no PUTs are performed.
+      private def render_diff_file_entries(json : JSON::Builder, repo : String, only : String?)
+        files = @config.files_for(repo)
+        return if files.nil? || files.empty?
+        plans = FileResource.new(@client).plan_repo(repo, files)
         plans.each do |plan|
           write_workflow_json_entry(json, plan)
         end
@@ -981,6 +1043,7 @@ module Gitorules
               end
               label_entries.each { |e| label_resource.write_json_entry(json, repo, e, dry_run) }
               render_apply_workflow_entries(json, repo, only, dry_run) if workflows_wanted?(only)
+              render_apply_file_entries(json, repo, only, dry_run) if files_wanted?(only)
             end
           end
         end
@@ -994,6 +1057,25 @@ module Gitorules
         workflows = @config.workflows_for(repo)
         return if workflows.nil? || workflows.empty?
         plans = WorkflowResource.new(@client).plan_repo(repo, workflows)
+        plans.each do |plan|
+          write_workflow_json_entry(json, plan, dry_run)
+        end
+      rescue ex
+        json.object do
+          json.field "resource", ""
+          json.field "action", "error"
+          json.field "changes", [] of String
+          json.field "error", ex.message
+        end
+      end
+
+      # Appends generic file plans to an apply JSON results array.
+      #
+      # Report-only: plans are computed via GETs, no PUTs are performed.
+      private def render_apply_file_entries(json : JSON::Builder, repo : String, only : String?, dry_run : Bool)
+        files = @config.files_for(repo)
+        return if files.nil? || files.empty?
+        plans = FileResource.new(@client).plan_repo(repo, files)
         plans.each do |plan|
           write_workflow_json_entry(json, plan, dry_run)
         end
@@ -1057,6 +1139,10 @@ module Gitorules
         if workflows_wanted?(only)
           apply_workflows(repo, dry_run, io, prefix, quiet, verbose)
         end
+
+        if files_wanted?(only)
+          apply_files(repo, dry_run, io, prefix, quiet, verbose)
+        end
       end
 
       # Syncs workflows for a repo via the Contents API.
@@ -1069,6 +1155,38 @@ module Gitorules
         plans = WorkflowResource.new(@client).sync_repo(repo, workflows, dry_run)
         plans.each do |plan|
           report_workflow_plan(repo, plan, dry_run, io, prefix, quiet, verbose)
+        end
+      end
+
+      # Syncs generic files for a repo via the Contents API.
+      #
+      # Dry-run mode performs zero PUTs and prints intentions instead.
+      # Matching shas are skipped silently unless verbose.
+      private def apply_files(repo : String, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false, verbose : Bool = false)
+        files = @config.files_for(repo)
+        return if files.nil? || files.empty?
+        plans = FileResource.new(@client).sync_repo(repo, files, dry_run)
+        plans.each do |plan|
+          report_file_plan(repo, plan, dry_run, io, prefix, quiet, verbose)
+        end
+      end
+
+      private def report_file_plan(repo : String, plan : WorkflowPlan, dry_run : Bool, io : IO, prefix : String, quiet : Bool, verbose : Bool)
+        case plan.action
+        when "create"
+          report_file_write(repo, plan.target, "create", "Created", dry_run, io, prefix, quiet)
+        when "update"
+          report_file_write(repo, plan.target, "update", "Updated", dry_run, io, prefix, quiet)
+        when "unchanged"
+          io.puts "#{prefix}#{repo}: File '#{plan.target}' up to date" if verbose && !quiet
+        end
+      end
+
+      private def report_file_write(repo : String, target : String, present : String, past : String, dry_run : Bool, io : IO, prefix : String, quiet : Bool)
+        if dry_run
+          io.puts "#{prefix}#{repo}: Would #{present} file '#{target}'" unless quiet
+        else
+          io.puts "#{prefix}#{repo}: #{past} file '#{target}'" unless quiet
         end
       end
 

@@ -48,7 +48,9 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Minimal packs](#minimal-packs)
     * [Stack presets](#stack-presets)
     * [Node and VSCode stacks](#node-and-vscode-stacks)
+* [Files sync](#files-sync)
 * [JSON output](#json-output)
+    * [Drift gate](#drift-gate)
 * [Development](#development)
 * [Contributing](#contributing)
 * [License](#license)
@@ -118,9 +120,10 @@ gitorules <status|apply|diff|init|lint|migrate|verify> [options]
 | `--diff`        | Show pending changes (same as `diff` command)        |
 | `--repo REPO`   | Target a single repository (`owner/name`)            |
 | `--scope NAME`  | Only process repositories in this scope             |
-| `--only LIST`   | Only process subsystems (`branch,labels,workflows`)  |
+| `--only LIST`   | Only process subsystems (`branch,labels,workflows,files`)  |
 | `--exclude REPO`| Exclude repository (repeatable)                      |
 | `--org ORG`     | GitHub organization name (for `init`)                |
+| `--template NAME` | Standard CI template for `init` (`ruby,node,crystal,gradle`) |
 | `--in-place`    | Overwrite config file in place (`migrate` only)      |
 | `--json`        | Machine-readable JSON output                         |
 | `--quiet`       | Suppress all output except errors                    |
@@ -792,6 +795,58 @@ In JSON output (`--json`), each label change is an entry shaped
 `{repo, resource, action, changes[]}` with `resource: "labels"`
 and `action` one of `create`, `update`, `orphan`, `unchanged`.
 
+## Files sync
+
+gitorules syncs generic config files from local sources via the
+Contents API, keeping linter configs, version pins, dependabot config
+and issue templates identical across repositories.
+
+```yaml
+files:
+  .rubocop.yml:
+    source: templates/.rubocop.yml
+  .ruby-version:
+    source: templates/.ruby-version
+  .github/dependabot.yml:
+    source: templates/dependabot.yml
+  .github/ISSUE_TEMPLATE/bug_report.md:
+    source: templates/bug_report.md
+```
+
+Keys are repository-relative target paths used as-is (unlike
+`workflows`, there is no bare-name prefix resolution). Multi-org mode
+supports `orgs.<org>.files` with the same shape.
+
+### Allowlist
+
+Only these paths may be synced (per file class):
+
+| Class | Paths |
+|-------|-------|
+| `linter` | `.rubocop.yml`, `.ameba.yml` |
+| `version` | `.ruby-version`, `.nvmrc` |
+| `dependabot` | `.github/dependabot.yml` |
+| `issue_template` | `.github/ISSUE_TEMPLATE/*.md` (no subdirectories) |
+| `workflow` | `.github/workflows/*.yml`, `.github/workflows/*.yaml` |
+
+A disallowed target aborts the run with exit code 2 before any API
+write. Use `gitorules diff --only files` to preview file changes and
+`gitorules apply --only files --yes` to apply them. `--dry-run`
+performs zero `PUT` requests.
+
+### Scaffold a fresh repository
+
+```shell
+gitorules init --repo myorg/new-repo --template ruby
+gitorules init --repo myorg/new-repo --template node
+gitorules init --repo myorg/new-repo --template crystal
+gitorules init --repo myorg/new-repo --template gradle
+```
+
+Each template writes only allowlisted paths (CI workflow plus the
+matching linter and version files). Matching shas are skipped;
+`--dry-run` prints intentions with zero writes.
+
 ## JSON output
 
 `--json` emits machine-readable JSON with a unified entry shape across
@@ -840,6 +895,39 @@ gitorules apply --json --dry-run | jq '.[0].results[] | {resource, action, chang
       exit 1
     fi
 ```
+
+### Drift gate
+
+Use `gitorules diff` as a CI drift gate. Exit codes:
+
+- **0** — no drift (everything up to date).
+- **1** — drift detected (pending creates or updates). The confirmation
+  prompt is bypassed in CI; use `--yes` only with `apply`.
+- **2** — execution error (config, auth, or API failure, including
+  allowlist violations).
+
+Text mode (`gitorules diff`) exits 1 when the output contains `+`, `-`
+or `~` change lines. JSON mode (`gitorules diff --json`) always exits 0
+on success; gate on the payload with `jq`:
+
+```shell
+gitorules diff --json > diff.json
+
+# Fail when any resource wants create or update.
+if jq -e '[.[].changes[]? | select(.action == "create" or .action == "update")] | length > 0' diff.json > /dev/null; then
+  echo "Drift detected"
+  jq -r '.[].changes[]? | select(.action == "create" or .action == "update") | "\(.resource): \(.action)"' diff.json
+  exit 1
+fi
+
+# Surface repo-level errors separately.
+jq -r '.[] | select(.action == "error") | "\(.repo): \(.error)"' diff.json
+```
+
+The same entry shape (`{repo, resource, action, changes[]}`) covers
+branch rulesets, labels, workflows, and generic files, so one `jq`
+filter gates all subsystems. Combine with `--only` to gate a single
+subsystem (for example `gitorules diff --only files --json`).
 
 Performance notes: repository listing follows GitHub `Link` pagination,
 per-repo work runs in a bounded fiber pool (size 10, ordered output),

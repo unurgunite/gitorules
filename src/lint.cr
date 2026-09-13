@@ -24,7 +24,7 @@ module Gitorules
   class Linter
     CHECK_RUNS_CMD        = "gh api repos/<org>/<repo>/commits/HEAD/check-runs --jq '.check_runs[].name'"
     VALID_RULE_FIELDS     = %w[merge squash rebase name pattern checks linear_history delete_branch]
-    VALID_TOP_LEVEL       = %w[org repos rules orgs defaults scopes labels labels_sync workflows]
+    VALID_TOP_LEVEL       = %w[org repos rules orgs defaults scopes labels labels_sync workflows files]
     VALID_WORKFLOW_FIELDS = %w[source extra_steps extra_steps_anchor]
 
     # Lints a config file. Prints errors and warnings.
@@ -128,7 +128,7 @@ module Gitorules
     end
 
     private def self.lint_has_any_rules(str_map : Hash(String, YAML::Any), path : String, errors : Array(String)) : Nil
-      return if str_map["rules"]? || str_map["orgs"]? || str_map["defaults"]? || str_map["scopes"]?
+      return if str_map["rules"]? || str_map["orgs"]? || str_map["defaults"]? || str_map["scopes"]? || str_map["workflows"]? || str_map["files"]? || str_map["labels"]?
       errors << "in #{path}: no rules found. Fix: add a `rules:` section, an `orgs:` section, or a `defaults:`/`scopes:` pair."
     end
 
@@ -214,7 +214,7 @@ module Gitorules
             unless v.as_a?
               errors << "in #{path} at scopes.#{scope_name}.repos: expected a list of repositories. Fix: use `repos:\\n      - org/repo`."
             end
-          when "exclude", "labels", "workflows"
+          when "exclude", "labels", "workflows", "files"
             # Reserved fields, no validation needed.
           else
             if field
