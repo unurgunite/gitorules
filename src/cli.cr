@@ -98,7 +98,6 @@ module Gitorules
         parser.on("--verbose", "Show detailed output") do
           options.verbose = true
         end
-
         parser.on("--org ORG", "GitHub organization name (for init)") do |v|
           options.org = v
         end
@@ -185,6 +184,13 @@ module Gitorules
         raise ExitSignal.new(2)
       end
 
+      begin
+        LabelsSync.validate!(loader.config)
+      rescue ex
+        STDERR.puts "Error loading config: #{ex.message}"
+        raise ExitSignal.new(2)
+      end
+
       only_set = parse_only_option!(options.only)
 
       if scope_name = options.scope
@@ -195,9 +201,9 @@ module Gitorules
         end
       end
 
-      if only_set && !only_set.includes?("branch")
+      if only_set && !only_set.includes?("branch") && !only_set.includes?("labels")
         unless options.quiet?
-          STDOUT.puts "Skipped branch rules (--only #{options.only}). Nothing to do."
+          STDOUT.puts "Skipped branch rules and labels (--only #{options.only}). Nothing to do."
         end
         return 0
       end
@@ -295,9 +301,9 @@ module Gitorules
 
     private def self.cmd_status(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
       if options.json?
-        engine.status_json(repos, io)
+        engine.status_json(repos, io, options.only)
       else
-        engine.status(repos, quiet: options.quiet?, io: io)
+        engine.status(repos, quiet: options.quiet?, io: io, only: options.only)
       end
       0
     end
@@ -305,20 +311,20 @@ module Gitorules
     private def self.cmd_apply(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO) : Int32
       if options.diff?
         if options.json?
-          engine.diff_json(repos, io)
+          engine.diff_json(repos, io, options.only)
         else
-          engine.diff(repos, io: io)
+          engine.diff(repos, io: io, only: options.only)
         end
         return 0
       end
 
       if options.json?
-        engine.apply_json(repos, dry_run: options.dry_run?, io: io)
+        engine.apply_json(repos, dry_run: options.dry_run?, io: io, only: options.only)
         return 0
       end
 
       diff_io = IO::Memory.new
-      engine.diff(repos, io: diff_io)
+      engine.diff(repos, io: diff_io, only: options.only)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 
@@ -331,7 +337,7 @@ module Gitorules
           end
         end
 
-        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, io: io)
+        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, io: io, only: options.only)
         1
       else
         io.puts "no changes" unless options.quiet?
@@ -341,7 +347,7 @@ module Gitorules
 
     private def self.cmd_diff(engine : Engine, repos : Array(String), options : Options, io : IO, groups : Hash(String, Array(String))? = nil) : Int32
       if options.json?
-        engine.diff_json(repos, io)
+        engine.diff_json(repos, io, options.only)
         return 0
       end
 
@@ -350,7 +356,7 @@ module Gitorules
       end
 
       diff_io = IO::Memory.new
-      engine.diff(repos, io: diff_io)
+      engine.diff(repos, io: diff_io, only: options.only)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 
@@ -380,7 +386,7 @@ module Gitorules
       io.puts "Scope: #{scope_name} (#{scope_repos.size} #{repo_word})" unless options.quiet?
 
       diff_io = IO::Memory.new
-      engine.diff(scope_repos, io: diff_io)
+      engine.diff(scope_repos, io: diff_io, only: options.only)
       diff_text = diff_io.to_s
       has_changes = diff_has_changes?(diff_text)
 

@@ -33,6 +33,7 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [What gitorules creates](#what-gitorules-creates)
     * [Config lookup logic](#config-lookup-logic)
     * [`gitorules status` output](#gitorules-status-output)
+    * [Labels](#labels)
 * [JSON output](#json-output)
 * [Development](#development)
 * [Contributing](#contributing)
@@ -93,6 +94,7 @@ gitorules <status|apply|diff|init> [options]
 | `--dry-run`     | Preview apply changes without making them       |
 | `--diff`        | Show pending changes (same as `diff` command)   |
 | `--repo REPO`   | Target a single repository (`owner/name`)       |
+| `--only RESOURCE` | Limit to resource (`rulesets`, `labels`)       |
 | `--org ORG`     | GitHub organization name (for `init`)           |
 | `--json`        | Machine-readable JSON output                    |
 | `--quiet`       | Suppress all output except errors               |
@@ -374,6 +376,73 @@ Checks suffix:
 - `+checks` — required checks present (possibly more)
 - `~checks` — checks exist but don't match config exactly
 - `-checks` — no checks rule at all
+
+### Labels
+
+gitorules can synchronize GitHub issue labels from the same config file.
+Labels apply to every managed repository selected for the run.
+
+```yaml
+org: unurgunite
+repos:
+  - docscribe
+rules:
+  default_branch:
+    merge: only
+labels:
+  - name: bug
+    color: d73a4a
+    description: Something is broken
+  - name: help wanted
+    color: "008672"
+    description: Extra attention is needed
+labels_sync: warn
+```
+
+| Field         | Type     | Description                          |
+|---------------|----------|--------------------------------------|
+| `name`        | `string` | Label name (unique per repository)   |
+| `color`       | `string` | Hex color without `#` (e.g. `d73a4a`) |
+| `description` | `string` | Short description (optional)         |
+
+Color comparison is case-insensitive and ignores a leading `#`;
+a missing description and an empty description are treated as equal.
+
+#### Sync modes (`labels_sync`)
+
+| Mode     | Missing labels | Differing labels | Orphan labels (not in config) |
+|----------|----------------|------------------|-------------------------------|
+| `warn` (default) | Created | Updated | Reported only, never deleted |
+| `prune`  | Created | Updated | Deleted |
+| `ignore` | Created | Updated | Skipped silently |
+
+> [!WARNING]
+> `labels_sync: prune` deletes every label that is not listed in
+> `labels:`, including labels created manually or by other tools.
+> Run `gitorules diff` first and review the `- Delete label` lines
+> before applying with `prune`.
+
+#### Token scopes
+
+Label sync uses the same authentication as rulesets: a Personal
+Access Token with `repo` and `read:org` scopes (or `GITHUB_TOKEN`
+with those scopes). No additional scopes are required.
+
+#### Limiting a run to labels
+
+```shell
+gitorules diff --only labels
+gitorules apply --only labels --yes
+gitorules status --only labels
+```
+
+Use `--only branch` to skip labels. `gitorules apply --dry-run`
+performs zero writes for labels: creations, updates, and prune
+deletions are only reported.
+
+In JSON output (`--json`), each label change is an entry shaped
+`{repo, resource, action, changes[]}` with `resource: "labels"`
+and `action` one of `create`, `update`, `orphan`, `unchanged`.
 
 ## JSON output
 

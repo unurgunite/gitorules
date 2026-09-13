@@ -324,5 +324,75 @@ module Gitorules
         raise format_error(resp)
       end
     end
+
+    # Lists issue labels for a repository.
+    #
+    # @param repo [String] Full repository name (owner/name)
+    # @return [Array(Label)] All labels (up to 100)
+    # @raise [RuntimeError] On API error (4xx, 5xx)
+    def list_labels(repo : String) : Array(Label)
+      body = get("/repos/#{repo}/labels?per_page=100")
+      Array(Label).from_json(body)
+    end
+
+    # Creates a new issue label.
+    #
+    # @param repo [String] Full repository name (owner/name)
+    # @param label [Label] Label with name, color, and description
+    # @return [Label] Created label
+    # @raise [RuntimeError] On API error (4xx, 5xx)
+    def create_label(repo : String, label : Label) : Label
+      payload = {"name" => label.name, "color" => label.norm_color, "description" => label.description}
+      body = post("/repos/#{repo}/labels", payload.to_json)
+      Label.from_json(body)
+    end
+
+    # Updates an existing issue label.
+    #
+    # @param repo [String] Full repository name (owner/name)
+    # @param current_name [String] Current label name in the URL
+    # @param label [Label] New label attributes
+    # @return [Label] Updated label
+    # @raise [RuntimeError] On API error (4xx, 5xx)
+    def update_label(repo : String, current_name : String, label : Label) : Label
+      payload = {"new_name" => label.name, "color" => label.norm_color, "description" => label.description}
+      body = patch("/repos/#{repo}/labels/#{URI.encode_path_segment(current_name)}", payload.to_json)
+      Label.from_json(body)
+    end
+
+    # Deletes an issue label.
+    #
+    # @param repo [String] Full repository name (owner/name)
+    # @param name [String] Label name
+    # @raise [RuntimeError] On API error (4xx, 5xx)
+    def delete_label(repo : String, name : String) : Nil
+      delete("/repos/#{repo}/labels/#{URI.encode_path_segment(name)}")
+      nil
+    end
+
+    # Performs an authenticated PATCH request.
+    #
+    # @param path [String] API path
+    # @param body [String] JSON request body
+    # @return [String] Response body
+    # @raise [RuntimeError] On API error via handle_errors
+    private def patch(path : String, body : String) : String
+      ensure_token!
+      resp = HTTP::Client.patch("#{BASE_URL}#{path}", headers: @headers, body: body)
+      handle_errors(resp)
+      resp.body
+    end
+
+    # Performs an authenticated DELETE request.
+    #
+    # @param path [String] API path
+    # @return [String] Response body
+    # @raise [RuntimeError] On API error via handle_errors
+    private def delete(path : String) : String
+      ensure_token!
+      resp = HTTP::Client.delete("#{BASE_URL}#{path}", headers: @headers)
+      handle_errors(resp)
+      resp.body
+    end
   end
 end
