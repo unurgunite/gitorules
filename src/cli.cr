@@ -99,7 +99,7 @@ module Gitorules
           options.scope = v
         end
 
-        parser.on("--only LIST", "Only process subsystems: branch,labels,workflows (comma-separated)") do |v|
+        parser.on("--only LIST", "Only process subsystems: branch,labels,workflows,files (comma-separated)") do |v|
           options.only = v
         end
 
@@ -115,6 +115,10 @@ module Gitorules
         end
         parser.on("--org ORG", "GitHub organization name (for init)") do |v|
           options.org = v
+        end
+
+        parser.on("--template NAME", "Standard CI template for init (ruby, node, crystal, gradle)") do |v|
+          options.template = v
         end
 
         parser.on("--json", "Machine-readable JSON output") do
@@ -257,12 +261,13 @@ module Gitorules
 
     # True when an `--only` filter selects none of the known subsystems.
     #
-    # Valid values are `branch`, `labels` and `workflows`. A validated
-    # set always contains at least one of them, so this is only a safety
-    # net for empty or future values.
+    # Valid values are `branch`, `labels`, `workflows` and `files`.
+    # A validated set always contains at least one of them, so this
+    # is only a safety net for empty or future values.
     private def self.nothing_to_do?(only_set : Set(String)?) : Bool
       return false unless only_set
-      !only_set.includes?("branch") && !only_set.includes?("labels") && !only_set.includes?("workflows")
+      !only_set.includes?("branch") && !only_set.includes?("labels") &&
+        !only_set.includes?("workflows") && !only_set.includes?("files")
     end
 
     private def self.build_client(options : Options) : GitHubClient
@@ -391,7 +396,10 @@ module Gitorules
 
       if diff_has_changes?(diff_text)
         unless options.yes?
-          STDERR.print "Apply these changes? [y/N] "
+          if deletion_planned?(diff_text)
+            STDERR.puts "WARNING: prune deletions planned — review before applying."
+          end
+          STDERR.print confirm_prompt(count_changes(diff_text), repos.size, options.scope)
           answer = input_io.gets
           unless answer && answer.strip.downcase == "y"
             return 1
@@ -407,6 +415,52 @@ module Gitorules
     rescue ex : WorkflowError
       STDERR.puts "Error: #{ex.message}"
       2
+    end
+
+    # Builds the apply confirmation prompt with blast radius.
+    #
+    # Shows change and repo counts plus the scope name when available.
+    # Falls back to the generic prompt when counts are unavailable.
+    # Default answer stays No.
+    #
+    # @param change_count [Int32?] Number of changed lines, or nil
+    # @param repo_count [Int32?] Number of repos, or nil
+    # @param scope [String?] Scope name, or nil
+    # @return [String] Prompt text ending with "[y/N] "
+    def self.confirm_prompt(change_count : Int32?, repo_count : Int32?, scope : String?) : String
+      if change_count && repo_count
+        change_word = change_count == 1 ? "change" : "changes"
+        repo_word = repo_count == 1 ? "repo" : "repos"
+        if scoped = scope
+          return "Apply #{change_count} #{change_word} to #{repo_count} #{repo_word} in scope #{scoped}? [y/N] "
+        end
+        return "Apply #{change_count} #{change_word} to #{repo_count} #{repo_word}? [y/N] "
+      end
+      "Apply these changes? [y/N] "
+    end
+
+    # Counts changed lines in diff output.
+    #
+    # @param diff_text [String] Rendered diff text
+    # @return [Int32] Number of lines starting with +, - or ~
+    def self.count_changes(diff_text : String) : Int32
+      diff_text.lines.count do |line|
+        stripped = line.strip
+        stripped.starts_with?("+") || stripped.starts_with?("-") || stripped.starts_with?("~")
+      end
+    end
+
+    # Returns true when the diff plans deletions.
+    #
+    # Matches prune delete lines such as "- Delete label".
+    #
+    # @param diff_text [String] Rendered diff text
+    # @return [Bool] True when deletions are planned
+    def self.deletion_planned?(diff_text : String) : Bool
+      diff_text.lines.any? do |line|
+        stripped = line.strip.downcase
+        stripped.starts_with?("- delete") || stripped.starts_with?("- orphan") || stripped.includes?("prune")
+      end
     end
 
     private def self.cmd_diff(engine : Engine, repos : Array(String), options : Options, io : IO, groups : Hash(String, Array(String))? = nil) : Int32
@@ -494,6 +548,10 @@ module Gitorules
     end
 
     private def self.handle_init(options : Options, client : GitHubClient) : Int32
+      if template = options.template
+        return handle_init_template(options, client, template)
+      end
+
       repos = if repo = options.repo
                 [repo]
               elsif org = options.org
@@ -515,6 +573,34 @@ module Gitorules
 
       generator = ConfigGenerator.new(client)
       generator.generate(repos)
+      0
+    end
+
+    # Scaffolds a standard CI template into a fresh repository.
+    #
+    # Writes only allowlisted paths. Unknown templates and missing
+    # --repo fail with exit code 2.
+    private def self.handle_init_template(options : Options, client : GitHubClient, template : String) : Int32
+      unless ConfigGenerator.template_files(template)
+        STDERR.puts "Error: unknown template '#{template}'. Valid templates: #{ConfigGenerator.template_names.join(", ")}."
+        raise ExitSignal.new(2)
+      end
+
+      unless repo = options.repo
+        STDERR.puts "Error: --repo required for init --template"
+        raise ExitSignal.new(2)
+      end
+
+      begin
+        generator = ConfigGenerator.new(client)
+        generator.scaffold_template(template, repo, STDOUT, options.dry_run?)
+      rescue ex : FileSyncError | WorkflowError
+        STDERR.puts "Error: #{ex.message}"
+        raise ExitSignal.new(2)
+      rescue ex
+        STDERR.puts "Error scaffolding template '#{template}' in #{repo}: #{ex.message}"
+        raise ExitSignal.new(2)
+      end
       0
     end
   end

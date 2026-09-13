@@ -17,7 +17,7 @@ module Gitorules
   # with an explicit `exclude` list. Effective branch rules merge
   # `defaults` with scope-specific rules, where scope values win per field.
   class ScopeResolver
-    VALID_ONLY_VALUES = ["branch", "labels", "workflows"]
+    VALID_ONLY_VALUES = ["branch", "labels", "workflows", "files"]
 
     def initialize(@config : Config)
     end
