@@ -4,7 +4,7 @@ version: 0.1.0
 authors:
   - unurgunite
 
-crystal: ">= 1.14.0"
+crystal: ">= 1.21.0"
 
 license: MIT
 
@@ -13,6 +13,8 @@ description: Declarative GitHub Ruleset Manager
 targets:
   gitorules:
     main: src/gitorules.cr
+  ameba:
+    main: lib/ameba/bin/ameba.cr
 
 development_dependencies:
   webmock:
