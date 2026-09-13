@@ -54,7 +54,7 @@ module Gitorules
       @headers = HTTP::Headers{
         "Authorization" => "Bearer #{@token}",
         "Accept"        => "application/vnd.github+json",
-        "User-Agent"    => "gitorules/0.1.0",
+        "User-Agent"    => "gitorules/#{VERSION}",
       }
     end
 
@@ -74,7 +74,7 @@ module Gitorules
       @headers = HTTP::Headers{
         "Authorization" => "Bearer #{token.token}",
         "Accept"        => "application/vnd.github+json",
-        "User-Agent"    => "gitorules/0.1.0",
+        "User-Agent"    => "gitorules/#{VERSION}",
       }
     end
 

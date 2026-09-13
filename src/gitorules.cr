@@ -14,7 +14,7 @@ require "./lint"
 require "./cli"
 
 module Gitorules
-  VERSION = "0.1.0"
+  VERSION = "0.2.0"
 end
 
 unless ENV["CRYSTAL_SPEC"]?
