@@ -31,7 +31,7 @@ module Gitorules
         output = STRIP_ANSI.call(io.to_s)
         output.should contain("✓ merge +checks")
         output.should contain("[1/1]")
-        output.should contain("All rulesets up to date")
+        output.should contain("All branch rules up to date")
       end
 
       it "warns for missing checks" do
@@ -133,7 +133,7 @@ module Gitorules
         io = IO::Memory.new
         engine.status([repo], quiet: true, io: io)
         output = io.to_s
-        output.should contain("All rulesets up to date")
+        output.should contain("All branch rules up to date")
         output.should_not contain("[1/1]")
         output.should_not contain("✓")
       end
@@ -145,7 +145,7 @@ module Gitorules
         io = IO::Memory.new
         engine.status(["unurgunite/unknown"], quiet: true, io: io)
         output = io.to_s
-        output.should contain("All rulesets up to date")
+        output.should contain("All branch rules up to date")
         output.should_not contain("[1/1]")
       end
 

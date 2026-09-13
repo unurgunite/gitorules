@@ -1,0 +1,36 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Lint shell scripts
+        run: |
+          shopt -s globstar nullglob
+          files=(**/*.sh)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No shell files found, skipping shellcheck."
+            exit 0
+          fi
+          shellcheck "${files[@]}"
+
+      # Extension point for per-repo steps (see Gradle pack docs).
+      # gitorules:extra-steps
+
+      - name: Run shell tests
+        run: |
+          if command -v bats >/dev/null 2>&1 && [ -d test ]; then
+            bats test/
+          elif [ -f test/run.sh ]; then
+            bash test/run.sh
+          else
+            echo "No shell test runner found (bats test/ or test/run.sh). Add tests or extend this step."
+          fi

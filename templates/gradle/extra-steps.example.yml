@@ -1,0 +1,22 @@
+# Example per-repo extra steps for the Gradle pack.
+#
+# Reference it from .gitorules.yml:
+#
+# ```yaml
+# workflows:
+#   ci.yml:
+#     source: templates/gradle/ci.yml
+#     extra_steps: templates/gradle/extra-steps.example.yml
+# ```
+#
+# Steps are appended verbatim after the `# gitorules:extra-steps`
+# anchor in the base template. Keep the 6-space indent so the
+# result stays valid YAML under `jobs.build.steps`.
+      - name: Check change notes
+        run: |
+          set -euo pipefail
+          VERSION="$(grep '^pluginVersion=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          if ! grep -q "<change-notes>.*${VERSION}.*</change-notes>" src/main/resources/META-INF/plugin.xml; then
+            echo "plugin.xml has no <change-notes> entry for $VERSION."
+            exit 1
+          fi

@@ -2,6 +2,7 @@ require "http/client"
 require "json"
 require "openssl"
 require "base64"
+require "uri"
 
 # Extends Crystal's LibCrypto with RSA/PEM functions needed for JWT signing.
 # Crystal's LibCrypto already has correct @[Link(...)] per platform.
@@ -279,6 +280,31 @@ module Gitorules
       return if resp.status_code == 404
       handle_errors(resp)
       json = JSON.parse(resp.body)
+      sha = json["sha"].to_s
+      encoded = json["content"].to_s.gsub(/\s/, "")
+      {sha: sha, content: String.new(Base64.decode(encoded))}
+    end
+
+    # Reads a template file from another repository at a pinned ref.
+    #
+    # Fetches `GET /repos/{repo}/contents/{path}?ref={ref}` so tag and
+    # commit SHA pins resolve to exact file content. Returns nil on 404.
+    #
+    # @param repo [String] Template repository (owner/name)
+    # @param path [String] File path inside the template repository
+    # @param ref [String] Tag name or commit SHA pin
+    # @return [NamedTuple(sha: String, content: String)?] Blob sha and decoded content
+    # @raise [RuntimeError] On API error (non-404 4xx, 5xx)
+    def get_contents_at_ref(repo : String, path : String, ref : String) : {sha: String, content: String}?
+      ensure_token!
+      encoded_ref = URI.encode_path(ref)
+      resp = HTTP::Client.get("#{BASE_URL}/repos/#{repo}/contents/#{path}?ref=#{encoded_ref}", headers: @headers)
+      return if resp.status_code == 404
+      handle_errors(resp)
+      json = JSON.parse(resp.body)
+      unless json.as_h?
+        raise "Template '#{path}' in '#{repo}@#{ref}' is not a file"
+      end
       sha = json["sha"].to_s
       encoded = json["content"].to_s.gsub(/\s/, "")
       {sha: sha, content: String.new(Base64.decode(encoded))}

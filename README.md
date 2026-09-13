@@ -19,6 +19,7 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Options](#options)
     * [Exit codes](#exit-codes)
     * [`gitorules lint`](#gitorules-lint)
+    * [`gitorules verify`](#gitorules-verify)
     * [`gitorules migrate`](#gitorules-migrate)
     * [Authentication](#authentication)
 * [Configuration: `.gitorules.yml`](#configuration-gitorulesyml)
@@ -38,10 +39,18 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Labels](#labels)
 * [Workflows sync](#workflows-sync)
     * [Template layout](#template-layout)
+    * [Remote sources and pinning](#remote-sources-and-pinning)
     * [Allowlist](#allowlist)
     * [Behavior](#behavior)
     * [Token scopes](#token-scopes)
+    * [Gradle pack](#gradle-pack)
+    * [Extension points](#extension-points)
+    * [Minimal packs](#minimal-packs)
+    * [Stack presets](#stack-presets)
+    * [Node and VSCode stacks](#node-and-vscode-stacks)
+* [Files sync](#files-sync)
 * [JSON output](#json-output)
+    * [Drift gate](#drift-gate)
 * [Development](#development)
 * [Contributing](#contributing)
 * [License](#license)
@@ -88,18 +97,19 @@ Requires Crystal 1.21+.
 ## CLI
 
 ```shell
-gitorules <status|apply|diff|init|lint|migrate> [options]
+gitorules <status|apply|diff|init|lint|migrate|verify> [options]
 ```
 
 ### Commands
 
 | Command   | Description                                       |
 |-----------|---------------------------------------------------|
-| `status`  | Show ruleset status for repositories              |
-| `apply`   | Apply ruleset configuration from `.gitorules.yml` |
+| `status`  | Show branch status for repositories               |
+| `apply`   | Apply branch configuration from `.gitorules.yml`  |
 | `diff`    | Show pending changes without applying             |
-| `init`    | Generate `.gitorules.yml` from existing rulesets  |
+| `init`    | Generate `.gitorules.yml` from existing branch rules |
 | `lint`    | Validate config schema and values (offline)       |
+| `verify`  | Verify required checks are produced by workflows (offline) |
 | `migrate` | Convert legacy config to `defaults`/`scopes` shape |
 
 ### Options
@@ -110,9 +120,10 @@ gitorules <status|apply|diff|init|lint|migrate> [options]
 | `--diff`        | Show pending changes (same as `diff` command)        |
 | `--repo REPO`   | Target a single repository (`owner/name`)            |
 | `--scope NAME`  | Only process repositories in this scope             |
-| `--only LIST`   | Only process subsystems (`branch,labels,workflows`)  |
+| `--only LIST`   | Only process subsystems (`branch,labels,workflows,files`)  |
 | `--exclude REPO`| Exclude repository (repeatable)                      |
 | `--org ORG`     | GitHub organization name (for `init`)                |
+| `--template NAME` | Standard CI template for `init` (`ruby,node,crystal,gradle`) |
 | `--in-place`    | Overwrite config file in place (`migrate` only)      |
 | `--json`        | Machine-readable JSON output                         |
 | `--quiet`       | Suppress all output except errors                    |
@@ -130,11 +141,13 @@ scripts/automation.
 
 ### Exit codes
 
-- **0** — all rulesets are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
+- **0** — all branch rules are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
+  For `verify`: all required checks are produced (warnings allowed).
   For `migrate`: migration succeeded. For `status`/`diff`/`apply`, see below
 - **1** — changes detected (in `diff` mode) or changes were applied (in `apply` mode). Also returned when the
   confirmation prompt is declined (changes exist but were skipped)
 - **2** — execution error (config error, API error, etc.). For `lint`: schema or value errors found.
+  For `verify`: required checks with no producing workflow found.
   For `migrate`: read, parse, or schema error
 
 ### `gitorules lint`
@@ -155,8 +168,35 @@ Checks include:
   `gh api repos/<org>/<repo>/commits/HEAD/check-runs`
 - check patterns with glob characters (`*`, `?`, `[`) produce a warning: they match locally
   and are skipped when creating rulesets
+- every exact required check must be produced by a workflow in the same scope
+  (see [`gitorules verify`](#gitorules-verify)): a stale check such as `check / check`
+  is an error shaped as what is wrong (the check name), where
+  (`rules.<scope>.<type>.checks`), how to fix (rename the check or update the
+  template), plus the list of checks the scope actually produces.
+  A produced job with no matching requirement is a warning, not an error
 
 Exit codes: **0** when the file is valid (warnings allowed), **2** on any error.
+
+### `gitorules verify`
+
+Dry-run report of required-vs-produced checks per scope (offline, no API calls,
+no token required). Reuses the same cross-check core as `lint` without failing
+the schema validation. Accepts both `gitorules verify` and `gitorules scope verify`
+spellings.
+
+```shell
+gitorules verify --config .gitorules.yml
+gitorules scope verify --scope backend --config .gitorules.yml
+gitorules verify --json | jq '.[] | {scope, missing, extra, ok}'
+```
+
+Matrix axes in templates expand to concrete GitHub check names
+(`CI / test (20)`), so comparison is exact, not prefix-based. Both
+`matrix: {key: [values]}` maps and `include:` lists are supported;
+unknown shapes fall back to the plain job name with a warning.
+
+Exit codes: **0** when every required check is produced (warnings allowed),
+**2** on missing checks or read/parse errors.
 
 ### `gitorules migrate`
 
@@ -459,6 +499,41 @@ Each key is the workflow file name; `source` is the local template path
 `.github/workflows/ci.yml` in every managed repository. Keys that already
 carry the `.github/workflows/` prefix are used as-is.
 
+### Remote sources and pinning
+
+A `source` can also reference a file from another repository with a pin:
+
+```yaml
+workflows:
+  ci.yml:
+    source: FlorexLabs/templates@v1:ruby/ci.yml
+```
+
+The shape is `owner/repo@ref:path`, where `path` is the file inside the
+template repository and `ref` is a tag (e.g. `v1`) or a full 40-hex commit
+SHA (e.g. `9a3b...`). Local paths without `@` keep the previous behavior.
+
+Tag pins track a moving tag; SHA pins are fully reproducible. Prefer SHA
+pins for production fleets and tags for tracking upstream.
+
+Resolution fetches `GET /repos/{repo}/contents/{path}?ref={ref}` with the
+same authentication as other API calls. Downloads cache in memory per run,
+so one pin used by many repos or workflows performs a single fetch.
+Set `GITORULES_CACHE_DIR` to a directory to also cache downloads on disk
+for offline-friendly repeated runs.
+
+Reproducibility is reported, not locked:
+
+- `gitorules diff --verbose` prints the resolved template sha per workflow,
+  e.g. `source 'FlorexLabs/templates@v1:ruby/ci.yml' resolved sha 91acc6...`.
+- JSON output (`diff --json`, `apply --json`) adds `source`, `resolved_sha`
+  (template blob sha) and `ref` fields to each workflow entry.
+
+Design note: resolved-sha reporting was chosen over a `.gitorules.lock`
+lockfile as the smaller fit — it reuses the existing unified JSON contract,
+adds no new file lifecycle or merge conflicts, and the blob sha already
+verifies content equality for the sha-match skip.
+
 ### Allowlist
 
 Only `.github/workflows/*.yml` (or `*.yaml`) targets are allowed — no
@@ -477,6 +552,185 @@ exit code 2 before any API write.
 Workflow sync needs `contents:write` (covered by the classic `repo` scope).
 For fine-grained tokens, grant **Contents** read and write on the managed
 repositories.
+
+### Gradle pack
+
+`templates/gradle/ci.yml` is an IntelliJ plugin CI template. It defines a
+single `build` job on `ubuntu-latest`, so the required check context stays
+stable as `CI / build`.
+
+Job steps in order:
+
+- checkout (`actions/checkout@v4`)
+- setup Java 21 on Temurin (`actions/setup-java@v4`, `cache: gradle`)
+- install Crystal (pinned version via `crystal-lang/install-crystal@v1`)
+- setup Gradle (`gradle/actions/setup-gradle@v4`)
+- version-consistency check: `pluginVersion` from `gradle.properties`
+  must match the commit message tag `[x.y.z]`, and `CHANGELOG.md` must
+  contain a matching `## [x.y.z]` section
+- test (`./gradlew test`)
+- verify (`./gradlew verifyPlugin`)
+- build (`./gradlew buildPlugin`)
+- upload (`actions/upload-artifact@v4`, `build/libs/*.zip`)
+
+Usage:
+```yaml
+workflows:
+  ci.yml:
+    source: templates/gradle/ci.yml
+```
+
+Require the stable context in branch protection:
+```yaml
+rules:
+  default_branch:
+    merge: only
+    checks:
+      - "CI / build"
+```
+
+### Extension points
+
+Some repositories need project-specific steps (for example a change-notes
+check that compares `CHANGELOG.md` against `plugin.xml`). The base template
+stays intact; overrides are explicit files appended at a marked anchor.
+
+Declare an extra-steps file per workflow entry:
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/gradle/ci.yml
+    extra_steps: templates/gradle/extra-steps.example.yml
+```
+
+Rules:
+
+- `extra_steps` is a local YAML file with a list of steps. It is appended
+  verbatim after the `# gitorules:extra-steps` marker in the base template.
+- Keep the 6-space indent in the extra file so the result stays valid YAML
+  under `jobs.build.steps`.
+- `extra_steps_anchor` optionally renames the marker (default:
+  `gitorules:extra-steps`). A blank anchor is an error.
+- An unknown anchor is an error: the marker must exist in the base file.
+  (For remote `repo@ref:path` bases the marker cannot be checked offline,
+  so the anchor check runs at sync time.)
+- There are no silent full-file overrides. Unknown workflow fields are
+  rejected by `gitorules lint`, and missing or invalid extra files fail
+  the sync for that repository.
+
+Example extra steps (see `templates/gradle/extra-steps.example.yml`):
+
+```yaml
+- name: Check change notes
+  run: ./gradlew checkChangeNotes
+```
+
+### Minimal packs
+
+Small starting points for non-Gradle repositories. Both use a single
+`build` job (`CI / build`) and expose the same `# gitorules:extra-steps`
+anchor.
+
+- `templates/python/ci.yml`: `setup-python` matrix (`3.11`, `3.12`) with
+  `pip` cache, dependency install, and a `pytest` skeleton.
+- `templates/shell/ci.yml`: `shellcheck` over `**/*.sh` plus a test
+  skeleton that runs `bats test/` when available.
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/python/ci.yml
+```
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/shell/ci.yml
+```
+
+### Stack presets
+
+Stack presets map one template pack to one scope. Each scope declares its own
+`workflows` entry pointing at the stack template. A complete working example
+ships as `.gitorules.yml.example` — copy it to `.gitorules.yml` and adapt the
+repo lists to your fleet:
+
+```yaml
+defaults:
+  rules:
+    default_branch:
+      merge: only
+  labels:
+    - name: bug
+      color: d73a4a
+      description: Something is broken
+    - name: enhancement
+      color: a2eeef
+      description: New feature or request
+
+scopes:
+  ruby-gems:
+    repos:
+      - unurgunite/docscribe
+      - unurgunite/genius-api
+    workflows:
+      ci.yml:
+        source: templates/ruby/ci.yml
+  crystal-shards:
+    repos:
+      - unurgunite/gitorules
+      - unurgunite/catalyst
+```
+
+The Ruby pack (`templates/ruby/ci.yml`) provides bundler cache, RuboCop style
+check, and RSpec across Ruby 3.1–3.4 in a single `test` job, so check contexts
+stay stable (`CI / test`). Run a preset with `--scope`:
+
+```shell
+gitorules diff --scope ruby-gems
+gitorules apply --scope ruby-gems --yes
+```
+
+### Node and VSCode stacks
+
+Two templates cover Node.js projects. Both define a single `test` job —
+the job name is part of the GitHub check context, so renaming it changes
+required checks and must stay in sync with branch rules.
+
+- `templates/node/ci.yml` — standard Node CI. Single `test` job on
+  `ubuntu-latest` with a `node-version: [20, 22, 24]` matrix. Installs with
+  `npm ci` (npm cache), then runs eslint, typecheck, and tests.
+  Matrix checks look like `"CI / test (20)"` — verify real names with
+  `gh api repos/<org>/<repo>/commits/HEAD/check-runs`.
+- `templates/node/vscode-ci.yml` — VSCode extension pipeline. Single `test`
+  job on `ubuntu-latest` with a `node-version: [18, 20, 22, 24]` by
+  `vscode-version: [stable, insiders]` matrix. Runs format check
+  (`npm run format:check`), lint, typecheck, compile, then extension tests
+  under `xvfb` with retry (`nick-fields/retry`, 10 minute timeout,
+  2 attempts).
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/node/ci.yml
+  vscode-ci.yml:
+    source: templates/node/vscode-ci.yml
+```
+
+Example branch rules for the standard Node template (matrix jobs produce
+one check per combination):
+
+```yaml
+rules:
+  default_branch:
+    merge: only
+    checks:
+      - "CI / test (20)"
+      - "CI / test (22)"
+      - "CI / test (24)"
+```
+```
 
 ### Labels
 Labels apply to every managed repository selected for the run.
@@ -523,7 +777,7 @@ a missing description and an empty description are treated as equal.
 
 #### Token scopes
 
-Label sync uses the same authentication as rulesets: a Personal
+Label sync uses the same authentication as branch rules: a Personal
 Access Token with `repo` and `read:org` scopes (or `GITHUB_TOKEN`
 with those scopes). No additional scopes are required.
 
@@ -542,6 +796,58 @@ deletions are only reported.
 In JSON output (`--json`), each label change is an entry shaped
 `{repo, resource, action, changes[]}` with `resource: "labels"`
 and `action` one of `create`, `update`, `orphan`, `unchanged`.
+
+## Files sync
+
+gitorules syncs generic config files from local sources via the
+Contents API, keeping linter configs, version pins, dependabot config
+and issue templates identical across repositories.
+
+```yaml
+files:
+  .rubocop.yml:
+    source: templates/.rubocop.yml
+  .ruby-version:
+    source: templates/.ruby-version
+  .github/dependabot.yml:
+    source: templates/dependabot.yml
+  .github/ISSUE_TEMPLATE/bug_report.md:
+    source: templates/bug_report.md
+```
+
+Keys are repository-relative target paths used as-is (unlike
+`workflows`, there is no bare-name prefix resolution). Multi-org mode
+supports `orgs.<org>.files` with the same shape.
+
+### Allowlist
+
+Only these paths may be synced (per file class):
+
+| Class | Paths |
+|-------|-------|
+| `linter` | `.rubocop.yml`, `.ameba.yml` |
+| `version` | `.ruby-version`, `.nvmrc` |
+| `dependabot` | `.github/dependabot.yml` |
+| `issue_template` | `.github/ISSUE_TEMPLATE/*.md` (no subdirectories) |
+| `workflow` | `.github/workflows/*.yml`, `.github/workflows/*.yaml` |
+
+A disallowed target aborts the run with exit code 2 before any API
+write. Use `gitorules diff --only files` to preview file changes and
+`gitorules apply --only files --yes` to apply them. `--dry-run`
+performs zero `PUT` requests.
+
+### Scaffold a fresh repository
+
+```shell
+gitorules init --repo myorg/new-repo --template ruby
+gitorules init --repo myorg/new-repo --template node
+gitorules init --repo myorg/new-repo --template crystal
+gitorules init --repo myorg/new-repo --template gradle
+```
+
+Each template writes only allowlisted paths (CI workflow plus the
+matching linter and version files). Matching shas are skipped;
+`--dry-run` prints intentions with zero writes.
 
 ## JSON output
 
@@ -591,6 +897,39 @@ gitorules apply --json --dry-run | jq '.[0].results[] | {resource, action, chang
       exit 1
     fi
 ```
+
+### Drift gate
+
+Use `gitorules diff` as a CI drift gate. Exit codes:
+
+- **0** — no drift (everything up to date).
+- **1** — drift detected (pending creates or updates). The confirmation
+  prompt is bypassed in CI; use `--yes` only with `apply`.
+- **2** — execution error (config, auth, or API failure, including
+  allowlist violations).
+
+Text mode (`gitorules diff`) exits 1 when the output contains `+`, `-`
+or `~` change lines. JSON mode (`gitorules diff --json`) always exits 0
+on success; gate on the payload with `jq`:
+
+```shell
+gitorules diff --json > diff.json
+
+# Fail when any resource wants create or update.
+if jq -e '[.[].changes[]? | select(.action == "create" or .action == "update")] | length > 0' diff.json > /dev/null; then
+  echo "Drift detected"
+  jq -r '.[].changes[]? | select(.action == "create" or .action == "update") | "\(.resource): \(.action)"' diff.json
+  exit 1
+fi
+
+# Surface repo-level errors separately.
+jq -r '.[] | select(.action == "error") | "\(.repo): \(.error)"' diff.json
+```
+
+The same entry shape (`{repo, resource, action, changes[]}`) covers
+branch rulesets, labels, workflows, and generic files, so one `jq`
+filter gates all subsystems. Combine with `--only` to gate a single
+subsystem (for example `gitorules diff --only files --json`).
 
 Performance notes: repository listing follows GitHub `Link` pagination,
 per-repo work runs in a bounded fiber pool (size 10, ordered output),

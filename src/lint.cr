@@ -22,9 +22,10 @@ module Gitorules
   # Checks rule values without calling the GitHub API. Every error
   # states what is wrong, where (file and key), and how to fix it.
   class Linter
-    CHECK_RUNS_CMD    = "gh api repos/<org>/<repo>/commits/HEAD/check-runs --jq '.check_runs[].name'"
-    VALID_RULE_FIELDS = %w[merge squash rebase name pattern checks linear_history delete_branch]
-    VALID_TOP_LEVEL   = %w[org repos rules orgs defaults scopes]
+    CHECK_RUNS_CMD        = "gh api repos/<org>/<repo>/commits/HEAD/check-runs --jq '.check_runs[].name'"
+    VALID_RULE_FIELDS     = %w[merge squash rebase name pattern checks linear_history delete_branch]
+    VALID_TOP_LEVEL       = %w[org repos rules orgs defaults scopes labels labels_sync workflows files]
+    VALID_WORKFLOW_FIELDS = %w[source extra_steps extra_steps_anchor]
 
     # Lints a config file. Prints errors and warnings.
     #
@@ -93,8 +94,13 @@ module Gitorules
         lint_scopes(scopes, path, errors, warnings)
       end
 
+      if workflows = str_map["workflows"]?
+        lint_workflows_map(workflows, "workflows", path, errors, warnings)
+      end
+
       lint_top_level_types(str_map, path, errors)
       lint_has_any_rules(str_map, path, errors)
+      lint_consistency(content, path, errors, warnings)
 
       LintResult.new(errors, warnings)
     rescue ex : YAML::ParseException
@@ -122,8 +128,27 @@ module Gitorules
     end
 
     private def self.lint_has_any_rules(str_map : Hash(String, YAML::Any), path : String, errors : Array(String)) : Nil
-      return if str_map["rules"]? || str_map["orgs"]? || str_map["defaults"]? || str_map["scopes"]?
+      return if str_map["rules"]? || str_map["orgs"]? || str_map["defaults"]? || str_map["scopes"]? || str_map["workflows"]? || str_map["files"]? || str_map["labels"]?
       errors << "in #{path}: no rules found. Fix: add a `rules:` section, an `orgs:` section, or a `defaults:`/`scopes:` pair."
+    end
+
+    # Cross-checks required checks against synced workflow templates.
+    #
+    # Every exact check must be produced by a job in the scope
+    # workflows. Missing checks become errors, extra jobs become
+    # warnings. Scopes without workflows are skipped.
+    private def self.lint_consistency(content : String, path : String, errors : Array(String), warnings : Array(String)) : Nil
+      config = Config.from_yaml(content)
+      base_dir = begin
+        File.dirname(File.expand_path(path))
+      rescue
+        Dir.current
+      end
+      _, consistency_errors, consistency_warnings = Consistency.check_all(config, base_dir, path)
+      errors.concat(consistency_errors)
+      warnings.concat(consistency_warnings)
+    rescue
+      # Config parsing failed; schema errors already reported.
     end
 
     private def self.lint_orgs(orgs : YAML::Any, path : String, errors : Array(String), warnings : Array(String)) : Nil
@@ -141,8 +166,12 @@ module Gitorules
         end
         org_map.each do |k, v|
           name = k.as_s?
-          next unless name == "rules"
-          lint_rules_map(v, "orgs.#{org_name}.rules", path, org_name, errors, warnings)
+          case name
+          when "rules"
+            lint_rules_map(v, "orgs.#{org_name}.rules", path, org_name, errors, warnings)
+          when "workflows"
+            lint_workflows_map(v, "orgs.#{org_name}.workflows", path, errors, warnings)
+          end
         end
       end
     end
@@ -185,7 +214,7 @@ module Gitorules
             unless v.as_a?
               errors << "in #{path} at scopes.#{scope_name}.repos: expected a list of repositories. Fix: use `repos:\\n      - org/repo`."
             end
-          when "exclude", "labels", "workflows"
+          when "exclude", "labels", "workflows", "files"
             # Reserved fields, no validation needed.
           else
             if field
@@ -194,6 +223,142 @@ module Gitorules
           end
         end
       end
+    end
+
+    # Validates a workflows mapping (top-level or per-org).
+    #
+    # Checks target allowlist, required `source`, known fields, and
+    # the explicit `extra_steps` override model: the extra file must
+    # exist, parse as a YAML step list, and reference an anchor marker
+    # present in the base template. No silent full-file overrides exist.
+    private def self.lint_workflows_map(node : YAML::Any, prefix : String, path : String, errors : Array(String), warnings : Array(String)) : Nil
+      flows = node.as_h?
+      unless flows
+        errors << "in #{path} at #{prefix}: expected a mapping of workflow files. Fix: use `#{prefix}:\n  ci.yml:\n    source: templates/ci.yml`."
+        return
+      end
+      if flows.empty?
+        errors << "in #{path} at #{prefix}: at least one workflow entry is required. Fix: add e.g. `ci.yml:` with `source: templates/ci.yml`."
+        return
+      end
+      flows.each do |key_any, val|
+        key = key_any.as_s? || "?"
+        lint_workflow_entry(val, "#{prefix}.#{key}", key, path, errors, warnings)
+      end
+    end
+
+    private def self.lint_workflow_entry(node : YAML::Any, location : String, key : String, path : String, errors : Array(String), warnings : Array(String)) : Nil
+      lint_workflow_target(key, location, path, errors)
+
+      entry_map = node.as_h?
+      unless entry_map
+        errors << "in #{path} at #{location}: expected a mapping with `source`. Fix: use `#{location}:\n    source: templates/ci.yml`."
+        return
+      end
+
+      fields = {} of String => YAML::Any
+      entry_map.each do |k, v|
+        if name = k.as_s?
+          fields[name] = v
+        end
+      end
+
+      (fields.keys - VALID_WORKFLOW_FIELDS).each do |field|
+        errors << "in #{path} at #{location}.#{field}: unknown field `#{field}`. Fix: use one of #{VALID_WORKFLOW_FIELDS.join(", ")} or remove the line."
+      end
+
+      source = fields["source"]?.try(&.as_s?).try(&.strip)
+      if source.nil? || source.empty?
+        errors << "in #{path} at #{location}.source: a template source is required. Fix: set `source: templates/#{key}` or `source: owner/repo@v1:path/to/file.yml`."
+        return
+      end
+
+      begin
+        parsed_source = TemplateSource.parse(source)
+      rescue ex : WorkflowError
+        errors << "in #{path} at #{location}.source: #{ex.message}. Fix: use a local path or `owner/repo@ref:path`."
+        return
+      end
+
+      base_content = nil
+      unless parsed_source.kind.remote?
+        base_content = read_lint_file(source)
+        if base_content.nil?
+          errors << "in #{path} at #{location}.source: file not found '#{source}'. Fix: check the path relative to the current directory."
+        end
+      end
+
+      anchor = lint_workflow_anchor(fields, location, path, errors, warnings)
+      return unless lint_workflow_extra_present?(fields, location, path, errors, warnings)
+
+      extra = fields["extra_steps"]?.try(&.as_s?).try(&.strip) || ""
+      lint_workflow_extra(extra, base_content, source, anchor, location, path, errors)
+    end
+
+    private def self.lint_workflow_target(key : String, location : String, path : String, errors : Array(String)) : Nil
+      target = WorkflowResource.target_path(key)
+      unless WorkflowResource.valid_target?(target)
+        errors << "in #{path} at #{location}: invalid workflow target '#{key}'. Fix: use a `.github/workflows/*.yml` file name without subdirectories."
+      end
+    end
+
+    private def self.lint_workflow_anchor(fields : Hash(String, YAML::Any), location : String, path : String, errors : Array(String), warnings : Array(String)) : String
+      anchor_raw = fields["extra_steps_anchor"]?.try(&.as_s?)
+      if fields.has_key?("extra_steps_anchor") && (anchor_raw.nil? || anchor_raw.strip.empty?)
+        errors << "in #{path} at #{location}.extra_steps_anchor: the anchor name must be a non-empty string. Fix: remove the line to use the default `gitorules:extra-steps`."
+      end
+      if fields.has_key?("extra_steps_anchor") && !fields.has_key?("extra_steps")
+        warnings << "in #{path} at #{location}.extra_steps_anchor: anchor is set but `extra_steps` is missing, so the anchor has no effect. Fix: add `extra_steps:` or remove the anchor line."
+      end
+      cleaned = anchor_raw.try(&.strip)
+      if cleaned.nil? || cleaned.empty?
+        WorkflowResource::EXTRA_STEPS_ANCHOR_DEFAULT
+      else
+        cleaned
+      end
+    end
+
+    private def self.lint_workflow_extra_present?(fields : Hash(String, YAML::Any), location : String, path : String, errors : Array(String), warnings : Array(String)) : Bool
+      return false unless fields.has_key?("extra_steps")
+      extra_path = fields["extra_steps"]?.try(&.as_s?).try(&.strip)
+      if extra_path.nil? || extra_path.empty?
+        errors << "in #{path} at #{location}.extra_steps: the extra steps path must be a non-empty string. Fix: set `extra_steps: path/to/extra-steps.yml` or remove the line."
+        return false
+      end
+      true
+    end
+
+    private def self.lint_workflow_extra(extra : String, base_content : String?, source : String, anchor : String, location : String, path : String, errors : Array(String)) : Nil
+      extra_content = read_lint_file(extra)
+      if extra_content.nil?
+        errors << "in #{path} at #{location}.extra_steps: file not found '#{extra}'. Fix: check the path relative to the current directory."
+        return
+      end
+      parsed = parse_lint_yaml(extra_content, location, path, extra, errors)
+      return if parsed.nil?
+      unless parsed.as_a?
+        errors << "in #{path} at #{location}.extra_steps: file '#{extra}' must contain a YAML list of steps. Fix: start the file with '- name: ...'."
+        return
+      end
+      if base = base_content
+        found = base.split("\n").any? { |line| WorkflowResource.anchor_line?(line, anchor) }
+        unless found
+          errors << "in #{path} at #{location}.extra_steps: unknown anchor '#{anchor}' (marker '# #{anchor}' not found in '#{source}'). Fix: add the marker to the base template or fix `extra_steps_anchor`."
+        end
+      end
+    end
+
+    private def self.read_lint_file(path : String) : String?
+      File.read(path)
+    rescue
+      nil
+    end
+
+    private def self.parse_lint_yaml(content : String, location : String, path : String, extra : String, errors : Array(String)) : YAML::Any?
+      YAML.parse(content)
+    rescue ex : YAML::ParseException
+      errors << "in #{path} at #{location}.extra_steps: file '#{extra}' is not valid YAML (#{ex.message}). Fix: provide a YAML list starting with '- name: ...'."
+      nil
     end
 
     private def self.lint_rules_map(node : YAML::Any, prefix : String, path : String, org : String?, errors : Array(String), warnings : Array(String)) : Nil
@@ -308,7 +473,7 @@ module Gitorules
           next
         end
         if glob_check?(text)
-          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating rulesets. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
+          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating branch rules. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
           next
         end
         unless text.includes?("/")
