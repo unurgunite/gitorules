@@ -38,6 +38,7 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Labels](#labels)
 * [Workflows sync](#workflows-sync)
     * [Template layout](#template-layout)
+    * [Remote sources and pinning](#remote-sources-and-pinning)
     * [Allowlist](#allowlist)
     * [Behavior](#behavior)
     * [Token scopes](#token-scopes)
@@ -458,6 +459,41 @@ Each key is the workflow file name; `source` is the local template path
 (relative to the current directory). The key `ci.yml` syncs to
 `.github/workflows/ci.yml` in every managed repository. Keys that already
 carry the `.github/workflows/` prefix are used as-is.
+
+### Remote sources and pinning
+
+A `source` can also reference a file from another repository with a pin:
+
+```yaml
+workflows:
+  ci.yml:
+    source: FlorexLabs/templates@v1:ruby/ci.yml
+```
+
+The shape is `owner/repo@ref:path`, where `path` is the file inside the
+template repository and `ref` is a tag (e.g. `v1`) or a full 40-hex commit
+SHA (e.g. `9a3b...`). Local paths without `@` keep the previous behavior.
+
+Tag pins track a moving tag; SHA pins are fully reproducible. Prefer SHA
+pins for production fleets and tags for tracking upstream.
+
+Resolution fetches `GET /repos/{repo}/contents/{path}?ref={ref}` with the
+same authentication as other API calls. Downloads cache in memory per run,
+so one pin used by many repos or workflows performs a single fetch.
+Set `GITORULES_CACHE_DIR` to a directory to also cache downloads on disk
+for offline-friendly repeated runs.
+
+Reproducibility is reported, not locked:
+
+- `gitorules diff --verbose` prints the resolved template sha per workflow,
+  e.g. `source 'FlorexLabs/templates@v1:ruby/ci.yml' resolved sha 91acc6...`.
+- JSON output (`diff --json`, `apply --json`) adds `source`, `resolved_sha`
+  (template blob sha) and `ref` fields to each workflow entry.
+
+Design note: resolved-sha reporting was chosen over a `.gitorules.lock`
+lockfile as the smaller fit — it reuses the existing unified JSON contract,
+adds no new file lifecycle or merge conflicts, and the blob sha already
+verifies content equality for the sha-match skip.
 
 ### Allowlist
 
