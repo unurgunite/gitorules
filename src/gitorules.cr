@@ -17,7 +17,7 @@ require "./verify"
 require "./cli"
 
 module Gitorules
-  VERSION = "0.2.0"
+  VERSION = "0.3.1"
 end
 
 unless ENV["CRYSTAL_SPEC"]?
