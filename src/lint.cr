@@ -93,6 +93,10 @@ module Gitorules
         lint_scopes(scopes, path, errors, warnings)
       end
 
+      if workflows = str_map["workflows"]?
+        lint_workflows(workflows, "workflows", path, errors)
+      end
+
       lint_top_level_types(str_map, path, errors)
       lint_has_any_rules(str_map, path, errors)
       lint_consistency(content, path, errors, warnings)
@@ -161,8 +165,12 @@ module Gitorules
         end
         org_map.each do |k, v|
           name = k.as_s?
-          next unless name == "rules"
-          lint_rules_map(v, "orgs.#{org_name}.rules", path, org_name, errors, warnings)
+          case name
+          when "rules"
+            lint_rules_map(v, "orgs.#{org_name}.rules", path, org_name, errors, warnings)
+          when "workflows"
+            lint_workflows(v, "orgs.#{org_name}.workflows", path, errors)
+          end
         end
       end
     end
@@ -212,6 +220,38 @@ module Gitorules
               errors << "in #{path} at scopes.#{scope_name}.#{field}: unknown scope field `#{field}`. Fix: use `repos`, `exclude`, or `rules`, or remove the key."
             end
           end
+        end
+      end
+    end
+
+    private def self.lint_workflows(node : YAML::Any, prefix : String, path : String, errors : Array(String)) : Nil
+      workflows_hash = node.as_h?
+      unless workflows_hash
+        errors << "in #{path} at #{prefix}: expected a mapping of workflow files. Fix: use `#{prefix}:\\n  ci.yml:\\n    source: templates/ci.yml`."
+        return
+      end
+      workflows_hash.each do |key, value|
+        target_key = key.as_s? || "?"
+        target = WorkflowResource.target_path(target_key)
+        unless WorkflowResource.valid_target?(target)
+          errors << "in #{path} at #{prefix}.#{target_key}: invalid workflow target '#{target_key}'. Fix: use only `.github/workflows/*.yml` file names with no subdirectories."
+          next
+        end
+        entry_map = value.as_h?
+        unless entry_map
+          errors << "in #{path} at #{prefix}.#{target_key}: expected a mapping with `source`. Fix: use `#{target_key}:\\n    source: templates/#{target_key}`."
+          next
+        end
+        source_node = entry_map[YAML::Any.new("source")]?
+        text = source_node.try(&.as_s?)
+        if text.nil? || text.strip.empty?
+          errors << "in #{path} at #{prefix}.#{target_key}.source: a template source is required. Fix: set `source: templates/#{target_key}` or `source: owner/repo@v1:path/to/file.yml`."
+          next
+        end
+        begin
+          TemplateSource.parse(text)
+        rescue ex : WorkflowError
+          errors << "in #{path} at #{prefix}.#{target_key}.source: #{ex.message}. Fix: use a local path or `owner/repo@ref:path`."
         end
       end
     end
@@ -328,7 +368,7 @@ module Gitorules
           next
         end
         if glob_check?(text)
-          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating rulesets. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
+          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating branch rules. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
           next
         end
         unless text.includes?("/")

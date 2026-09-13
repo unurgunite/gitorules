@@ -400,6 +400,12 @@ module Gitorules
           errors << "in #{config_path} at #{scope_workflows_location(nil, scope_name)}.#{key}: workflow #{key.inspect} has no source configured. Fix: add `source: templates/#{key}` or remove the entry."
           next
         end
+        if remote_source?(source)
+          # Remote sources resolve over the API, not the local disk.
+          # Offline consistency checks cannot fetch them; syntax is
+          # already validated by `lint_workflows`, so skip silently.
+          next
+        end
         template_path = resolve_source(source, base_dir)
         unless File.exists?(template_path)
           errors << "in #{config_path} at #{scope_workflows_location(nil, scope_name)}.#{key}: template source #{source.inspect} not found (looked at #{template_path.inspect}). Fix: create the template or fix the `source:` path."
@@ -420,6 +426,17 @@ module Gitorules
     private def self.resolve_source(source : String, base_dir : String) : String
       return source if Path[source].absolute?
       File.join(base_dir, source)
+    end
+
+    # True for `owner/repo@ref:path` references (resolved over the API).
+    #
+    # Malformed sources are reported by `lint_workflows`; here they
+    # fall through to the local-disk check and its error message.
+    private def self.remote_source?(source : String) : Bool
+      parsed = TemplateSource.parse(source)
+      parsed.kind.remote?
+    rescue WorkflowError
+      false
     end
 
     # Location prefix for a branch-type checks key.
