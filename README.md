@@ -19,6 +19,7 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Options](#options)
     * [Exit codes](#exit-codes)
     * [`gitorules lint`](#gitorules-lint)
+    * [`gitorules verify`](#gitorules-verify)
     * [`gitorules migrate`](#gitorules-migrate)
     * [Authentication](#authentication)
 * [Configuration: `.gitorules.yml`](#configuration-gitorulesyml)
@@ -88,7 +89,7 @@ Requires Crystal 1.21+.
 ## CLI
 
 ```shell
-gitorules <status|apply|diff|init|lint|migrate> [options]
+gitorules <status|apply|diff|init|lint|migrate|verify> [options]
 ```
 
 ### Commands
@@ -100,6 +101,7 @@ gitorules <status|apply|diff|init|lint|migrate> [options]
 | `diff`    | Show pending changes without applying             |
 | `init`    | Generate `.gitorules.yml` from existing rulesets  |
 | `lint`    | Validate config schema and values (offline)       |
+| `verify`  | Verify required checks are produced by workflows (offline) |
 | `migrate` | Convert legacy config to `defaults`/`scopes` shape |
 
 ### Options
@@ -131,10 +133,12 @@ scripts/automation.
 ### Exit codes
 
 - **0** — all rulesets are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
+  For `verify`: all required checks are produced (warnings allowed).
   For `migrate`: migration succeeded. For `status`/`diff`/`apply`, see below
 - **1** — changes detected (in `diff` mode) or changes were applied (in `apply` mode). Also returned when the
   confirmation prompt is declined (changes exist but were skipped)
 - **2** — execution error (config error, API error, etc.). For `lint`: schema or value errors found.
+  For `verify`: required checks with no producing workflow found.
   For `migrate`: read, parse, or schema error
 
 ### `gitorules lint`
@@ -155,8 +159,35 @@ Checks include:
   `gh api repos/<org>/<repo>/commits/HEAD/check-runs`
 - check patterns with glob characters (`*`, `?`, `[`) produce a warning: they match locally
   and are skipped when creating rulesets
+- every exact required check must be produced by a workflow in the same scope
+  (see [`gitorules verify`](#gitorules-verify)): a stale check such as `check / check`
+  is an error shaped as what is wrong (the check name), where
+  (`rules.<scope>.<type>.checks`), how to fix (rename the check or update the
+  template), plus the list of checks the scope actually produces.
+  A produced job with no matching requirement is a warning, not an error
 
 Exit codes: **0** when the file is valid (warnings allowed), **2** on any error.
+
+### `gitorules verify`
+
+Dry-run report of required-vs-produced checks per scope (offline, no API calls,
+no token required). Reuses the same cross-check core as `lint` without failing
+the schema validation. Accepts both `gitorules verify` and `gitorules scope verify`
+spellings.
+
+```shell
+gitorules verify --config .gitorules.yml
+gitorules scope verify --scope backend --config .gitorules.yml
+gitorules verify --json | jq '.[] | {scope, missing, extra, ok}'
+```
+
+Matrix axes in templates expand to concrete GitHub check names
+(`CI / test (20)`), so comparison is exact, not prefix-based. Both
+`matrix: {key: [values]}` maps and `include:` lists are supported;
+unknown shapes fall back to the plain job name with a warning.
+
+Exit codes: **0** when every required check is produced (warnings allowed),
+**2** on missing checks or read/parse errors.
 
 ### `gitorules migrate`
 
