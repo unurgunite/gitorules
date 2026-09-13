@@ -328,7 +328,7 @@ module Gitorules
           next
         end
         if glob_check?(text)
-          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating rulesets. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
+          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating branch rules. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
           next
         end
         unless text.includes?("/")
