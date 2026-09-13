@@ -25,7 +25,7 @@ module Gitorules
         property added : Array(String)
         property removed : Array(String)
         property param_changes : Array(String)
-        property glob_matched : Bool
+        property? glob_matched : Bool
         property fetch_error : String?
 
         def initialize(
@@ -64,7 +64,7 @@ module Gitorules
           prefix = "[#{i + 1}/#{repos.size}] "
           begin
             status_repo_line(repo, types, io, prefix, quiet)
-          rescue ex
+          rescue
             io.puts error_io_line(repo, types, prefix, io) unless quiet
             errors += 1
           end
@@ -108,18 +108,21 @@ module Gitorules
         io.puts(JSON.build do |json|
           json.array do
             repos.each do |repo|
-              begin
-                diff_json_repo(json, repo)
-              rescue ex
-                json.object do
-                  json.field "repo", repo
-                  json.field "error", ex.message
-                end
-                errors += 1
-              end
+              errors += diff_json_repo_entry(json, repo)
             end
           end
         end)
+      end
+
+      private def diff_json_repo_entry(json : JSON::Builder, repo : String) : Int32
+        diff_json_repo(json, repo)
+        0
+      rescue ex
+        json.object do
+          json.field "repo", repo
+          json.field "error", ex.message
+        end
+        1
       end
 
       def apply(repos : Array(String), dry_run : Bool = false, quiet : Bool = false, io : IO = STDOUT)
@@ -142,18 +145,21 @@ module Gitorules
         io.puts(JSON.build do |json|
           json.array do
             repos.each do |repo|
-              begin
-                apply_json_repo(json, repo, dry_run)
-              rescue ex
-                json.object do
-                  json.field "repo", repo
-                  json.field "error", ex.message
-                end
-                errors += 1
-              end
+              errors += apply_json_repo_entry(json, repo, dry_run)
             end
           end
         end)
+      end
+
+      private def apply_json_repo_entry(json : JSON::Builder, repo : String, dry_run : Bool) : Int32
+        apply_json_repo(json, repo, dry_run)
+        0
+      rescue ex
+        json.object do
+          json.field "repo", repo
+          json.field "error", ex.message
+        end
+        1
       end
 
       private def status_print_header(types : Array(String), io : IO)
@@ -170,7 +176,7 @@ module Gitorules
         begin
           rulesets = @client.list_rulesets(repo)
           types.each { |type| results[type] = status_type_result(repo, rulesets, type, rules, io) }
-        rescue ex
+        rescue
           io.puts error_io_line(repo, types, prefix, io) unless quiet
           return
         end
@@ -391,25 +397,33 @@ module Gitorules
 
         entries = compare(repo, existing, @config.rules_for(repo))
         entries.each do |entry|
-          case entry.kind
-          when .create?
-            if wanted = entry.wanted
-              render_text_create(wanted, io, quiet)
-            end
-          when .update?, .unchanged?
-            if message = entry.fetch_error
-              if wanted = entry.wanted
-                io.puts "  #{wanted.name}: Error fetching full ruleset: #{message}" unless quiet
-              end
-            else
-              render_text_update(entry, io, quiet)
-            end
-          when .orphan?
-            io.puts "  #{diff_orphan(entry.name, io)}" unless quiet
-          end
+          render_text_entry(entry, io, quiet)
         end
 
         io.puts "" unless quiet
+      end
+
+      private def render_text_entry(entry : DiffEntry, io : IO, quiet : Bool = false)
+        case entry.kind
+        when .create?
+          if wanted = entry.wanted
+            render_text_create(wanted, io, quiet)
+          end
+        when .update?, .unchanged?
+          render_text_update_entry(entry, io, quiet)
+        when .orphan?
+          io.puts "  #{diff_orphan(entry.name, io)}" unless quiet
+        end
+      end
+
+      private def render_text_update_entry(entry : DiffEntry, io : IO, quiet : Bool = false)
+        if message = entry.fetch_error
+          if wanted = entry.wanted
+            io.puts "  #{wanted.name}: Error fetching full ruleset: #{message}" unless quiet
+          end
+        else
+          render_text_update(entry, io, quiet)
+        end
       end
 
       private def diff_json_repo(json : JSON::Builder, repo : String)
@@ -472,7 +486,7 @@ module Gitorules
         entry.removed.each { |r| changes << diff_remove(r, io) }
         entry.param_changes.each { |c| changes << c }
 
-        if entry.glob_matched
+        if entry.glob_matched?
           changes << diff_unchanged("required_status_checks (matched by glob pattern, left unchanged)", io)
         end
 
@@ -504,7 +518,7 @@ module Gitorules
         entry.added.each { |r| changes << "+#{r}" }
         entry.removed.each { |r| changes << "-#{r}" }
         changes.concat(entry.param_changes)
-        if entry.glob_matched
+        if entry.glob_matched?
           changes << "required_status_checks (matched by glob pattern)"
         end
 
@@ -710,33 +724,45 @@ module Gitorules
 
       private def apply_ruleset(repo : String, existing : Ruleset?, wanted : Ruleset, config : BranchRuleConfig, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false)
         if dry_run
-          if existing && existing.id
-            io.puts "#{prefix}#{repo}: Would update ruleset '#{wanted.name}' (ID #{existing.id})" unless quiet
-          else
-            io.puts "#{prefix}#{repo}: Would create ruleset '#{wanted.name}'" unless quiet
-          end
+          apply_ruleset_dry_run(repo, existing, wanted, io, prefix, quiet)
           return
         end
 
         if existing && (id = existing.id)
-          if config.glob_checks?
-            begin
-              full = @client.get_ruleset(repo, id)
-              if existing_checks = full.rules.find { |r| r.type == "required_status_checks" }
-                wanted.rules << existing_checks unless wanted.rules.any? { |r| r.type == "required_status_checks" }
-              end
-            rescue
-            end
-          end
+          preserve_glob_checks(repo, id, wanted, config)
           @client.update_ruleset(repo, id, wanted)
           io.puts "#{prefix}#{repo}: Updated ruleset '#{wanted.name}'" unless quiet
         else
-          if config.glob_checks?
-            io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}' (checks skipped — glob patterns can't be applied on create)" unless quiet
-          else
-            io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}'" unless quiet
-          end
+          apply_ruleset_create_message(repo, wanted, config, io, prefix, quiet)
           @client.create_ruleset(repo, wanted)
+        end
+      end
+
+      private def apply_ruleset_dry_run(repo : String, existing : Ruleset?, wanted : Ruleset, io : IO, prefix : String, quiet : Bool)
+        if existing && existing.id
+          io.puts "#{prefix}#{repo}: Would update ruleset '#{wanted.name}' (ID #{existing.id})" unless quiet
+        else
+          io.puts "#{prefix}#{repo}: Would create ruleset '#{wanted.name}'" unless quiet
+        end
+      end
+
+      private def preserve_glob_checks(repo : String, id : Int64, wanted : Ruleset, config : BranchRuleConfig)
+        return unless config.glob_checks?
+
+        begin
+          full = @client.get_ruleset(repo, id)
+          if existing_checks = full.rules.find { |r| r.type == "required_status_checks" }
+            wanted.rules << existing_checks unless wanted.rules.any? { |r| r.type == "required_status_checks" }
+          end
+        rescue
+        end
+      end
+
+      private def apply_ruleset_create_message(repo : String, wanted : Ruleset, config : BranchRuleConfig, io : IO, prefix : String, quiet : Bool)
+        if config.glob_checks?
+          io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}' (checks skipped — glob patterns can't be applied on create)" unless quiet
+        else
+          io.puts "#{prefix}#{repo}: Created ruleset '#{wanted.name}'" unless quiet
         end
       end
 

@@ -1,2 +1,8 @@
 Naming/BlockParameterName:
   Enabled: false
+
+# Test fixtures use inline multiline JSON bodies for stubbed API responses.
+# Rewriting them as heredocs adds churn with no readability benefit.
+Style/MultilineStringLiteral:
+  Excluded:
+    - spec/**/*.cr
