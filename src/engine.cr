@@ -650,22 +650,26 @@ module Gitorules
       return if workflows.nil? || workflows.empty?
       plans = WorkflowResource.new(@client).sync_repo(repo, workflows, dry_run)
       plans.each do |plan|
-        case plan.action
-        when "create"
-          if dry_run
-            io.puts "#{prefix}#{repo}: Would create workflow '#{plan.target}'" unless quiet
-          else
-            io.puts "#{prefix}#{repo}: Created workflow '#{plan.target}'" unless quiet
-          end
-        when "update"
-          if dry_run
-            io.puts "#{prefix}#{repo}: Would update workflow '#{plan.target}'" unless quiet
-          else
-            io.puts "#{prefix}#{repo}: Updated workflow '#{plan.target}'" unless quiet
-          end
-        when "unchanged"
-          io.puts "#{prefix}#{repo}: Workflow '#{plan.target}' up to date" if verbose && !quiet
-        end
+        report_workflow_plan(repo, plan, dry_run, io, prefix, quiet, verbose)
+      end
+    end
+
+    private def report_workflow_plan(repo : String, plan : WorkflowPlan, dry_run : Bool, io : IO, prefix : String, quiet : Bool, verbose : Bool)
+      case plan.action
+      when "create"
+        report_workflow_write(repo, plan.target, "create", "Created", dry_run, io, prefix, quiet)
+      when "update"
+        report_workflow_write(repo, plan.target, "update", "Updated", dry_run, io, prefix, quiet)
+      when "unchanged"
+        io.puts "#{prefix}#{repo}: Workflow '#{plan.target}' up to date" if verbose && !quiet
+      end
+    end
+
+    private def report_workflow_write(repo : String, target : String, present : String, past : String, dry_run : Bool, io : IO, prefix : String, quiet : Bool)
+      if dry_run
+        io.puts "#{prefix}#{repo}: Would #{present} workflow '#{target}'" unless quiet
+      else
+        io.puts "#{prefix}#{repo}: #{past} workflow '#{target}'" unless quiet
       end
     end
 

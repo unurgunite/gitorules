@@ -204,7 +204,7 @@ module Gitorules
     def get_contents(repo : String, path : String) : {sha: String, content: String}?
       ensure_token!
       resp = HTTP::Client.get("#{BASE_URL}/repos/#{repo}/contents/#{path}", headers: @headers)
-      return nil if resp.status_code == 404
+      return if resp.status_code == 404
       handle_errors(resp)
       json = JSON.parse(resp.body)
       sha = json["sha"].to_s

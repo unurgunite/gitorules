@@ -242,10 +242,10 @@ struct Config
   # @param repo [String] Full repository name (org/repo)
   # @return [Hash(String, WorkflowConfig)?] Workflows for the repo's org
   def workflows_for(repo : String) : Hash(String, WorkflowConfig)?
-    return self.workflows if self.workflows # single-org mode
+    return workflows if workflows # single-org mode
 
     org_name = repo.split("/").first?
-    if org_name && (config_orgs = self.orgs)
+    if org_name && (config_orgs = orgs)
       org_config = config_orgs[org_name]?
       return org_config.workflows if org_config
     end
