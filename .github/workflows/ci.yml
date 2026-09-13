@@ -7,11 +7,23 @@ jobs:
     if: github.base_ref == 'master'
     uses: FlorexLabs/shared-workflows/.github/workflows/check-source-branch.yml@master
 
-  build:
-    runs-on: ubuntu-latest
+  test:
     strategy:
+      fail-fast: false
       matrix:
-        crystal: [1.14.0, 1.20.0]
+        include:
+          - os: ubuntu-latest
+            crystal: "1.14.0"
+          - os: ubuntu-latest
+            crystal: "1.20.0"
+          - os: macos-latest
+            crystal: latest
+          - os: macos-15-intel
+            crystal: latest
+          - os: windows-latest
+            crystal: latest
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +34,7 @@ jobs:
           crystal: ${{ matrix.crystal }}
 
       - name: Cache shards
+        if: runner.os != 'Windows'
         uses: actions/cache@v4
         with:
           path: ~/.cache/shards
@@ -33,10 +46,11 @@ jobs:
         run: shards install
 
       - name: Check formatting
-        if: matrix.crystal == '1.20.0'
+        if: runner.os != 'Windows' && matrix.crystal == '1.20.0'
         run: crystal tool format --check
 
       - name: Lint
+        if: runner.os != 'Windows'
         run: bin/ameba
 
       - name: Test

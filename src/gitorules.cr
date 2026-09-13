@@ -8,3 +8,7 @@ require "./cli"
 module Gitorules
   VERSION = "0.1.0"
 end
+
+unless ENV["CRYSTAL_SPEC"]?
+  exit(Gitorules::CLI.run)
+end

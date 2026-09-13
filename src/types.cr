@@ -42,7 +42,7 @@ struct Ruleset
   # Conditions that determine which branches/tags this ruleset applies to.
   property conditions : Hash(String, JSON::Any)?
   # Ordered list of rules to enforce.
-  property rules : Array(Rule)
+  property rules : Array(Rule) = [] of Rule
 
   def initialize(
     @name : String,
@@ -80,6 +80,80 @@ struct BranchRuleConfig
   property linear_history : Bool?
   # Auto-delete head branches after merge.
   property delete_branch : Bool?
+
+  # Validates configuration values and collects errors/warnings.
+  #
+  # Checks merge method fields for invalid values and warns about
+  # unsupported fields. Raises on invalid config, prints warnings
+  # to STDERR for unsupported features.
+  #
+  # @param type_name [String] Branch type name for error messages (e.g. "default_branch")
+  # @raise [RuntimeError] If merge/squash/rebase has invalid value
+  def validate!(type_name : String = "?") : Nil
+    errors = [] of String
+    warnings = [] of String
+
+    {% for field in ["merge", "squash", "rebase"] %}
+      unless (value = {{field.id}}) == "only" || value.nil?
+        errors << "rules.#{type_name}.#{ {{field}} }: expected \"only\" or nil, got #{value.inspect}"
+      end
+    {% end %}
+
+    if linear_history == true
+      warnings << "rules.#{type_name}.linear_history: field not yet implemented — ignoring"
+    end
+
+    if delete_branch == true
+      warnings << "rules.#{type_name}.delete_branch: field not yet implemented — ignoring"
+    end
+
+    warnings.each { |w| STDERR.puts "Warning: #{w}" }
+
+    unless errors.empty?
+      raise errors.join("\n")
+    end
+  end
+
+  # Returns true if any check contains glob characters (*, ?, [)
+  @[YAML::Field(ignore: true)]
+  def glob_checks? : Bool
+    checks.try &.any? { |c| c.includes?('*') || c.includes?('?') || c.includes?('[') } || false
+  end
+
+  # Checks if actual check contexts match expected patterns (supports glob).
+  # Each expected pattern must match at least one actual check.
+  # Exact patterns use direct equality, glob patterns use File.match?.
+  @[YAML::Field(ignore: true)]
+  def checks_match?(actual : Array(String)) : Bool
+    expected = self.checks
+    return false unless expected
+    return false if actual.empty?
+
+    expected.all? do |pattern|
+      if pattern.includes?('*') || pattern.includes?('?') || pattern.includes?('[')
+        actual.any? { |c| File.match?(pattern, c) }
+      else
+        actual.includes?(pattern)
+      end
+    end
+  end
+
+  # Validates at most one merge method set to "only".
+  #
+  # Prints error to STDERR if multiple methods conflict.
+  # Returns true if valid, false on conflict.
+  @[YAML::Field(ignore: true)]
+  def validate_merge_methods! : Bool
+    conflicting = [] of String
+    conflicting << "merge" if merge == "only"
+    conflicting << "squash" if squash == "only"
+    conflicting << "rebase" if rebase == "only"
+    if conflicting.size > 1
+      STDERR.puts "Error: only one merge method allowed per rule (found #{conflicting.map { |f| "#{f}: only" }.join(" + ")})"
+      return false
+    end
+    true
+  end
 
   # Resolves the effective merge method from config shorthand.
   #
@@ -152,8 +226,9 @@ end
 
 # CLI options passed via command-line flags.
 struct Options
-  # Operation mode: "status", "apply", "init".
-  property mode : String = "status"
+  # Operation mode: "status", "apply", "diff", "init".
+  # Empty string means no command was given — show help.
+  property mode : String = ""
   # Target specific repository (full name).
   property repo : String? = nil
   # Preview changes without applying.
@@ -164,6 +239,8 @@ struct Options
   property? json : Bool = false
   # Suppress all output except errors.
   property? quiet : Bool = false
+  # Skip confirmation prompt (apply mode).
+  property? yes : Bool = false
   # GitHub personal access token.
   property token : String? = nil
   # GitHub App ID (for GitHub App auth).

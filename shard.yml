@@ -10,6 +10,10 @@ license: MIT
 
 description: Declarative GitHub Ruleset Manager
 
+targets:
+  gitorules:
+    main: src/gitorules.cr
+
 development_dependencies:
   webmock:
     github: manastech/webmock.cr
