@@ -1,8 +1,16 @@
 require "./types"
+require "./concurrent"
+require "./json_entry"
+require "./scope"
+require "./labels"
 require "./github"
 require "./config"
+require "./workflows"
+require "./resource"
+require "./resources/branch_rules"
 require "./engine"
 require "./init"
+require "./lint"
 require "./cli"
 
 module Gitorules

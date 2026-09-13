@@ -1,0 +1,12 @@
+org: unurgunite
+repos:
+  - docscribe
+  - genius-api
+rules:
+  default_branch:
+    merge: only
+    checks:
+      - "CI / build"
+  release:
+    pattern: "v*"
+    squash: only

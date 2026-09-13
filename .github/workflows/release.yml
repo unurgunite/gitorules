@@ -49,7 +49,7 @@ jobs:
       - name: Install Crystal
         uses: crystal-lang/install-crystal@v1
         with:
-          crystal: "1.14.0"
+          crystal: "1.21.0"
 
       - name: Install dependencies
         run: shards install

@@ -3,7 +3,7 @@
 <p align="center">
 <a href="https://github.com/unurgunite/gitorules/actions"><img src="https://github.com/unurgunite/gitorules/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
 <a href="https://github.com/unurgunite/gitorules/blob/master/LICENSE"><img src="https://img.shields.io/github/license/unurgunite/gitorules.svg" alt="License"></a>
-<a href="https://crystal-lang.org"><img src="https://img.shields.io/badge/crystal-%3E%3D%201.14-blue.svg" alt="Crystal"></a>
+<a href="https://crystal-lang.org"><img src="https://img.shields.io/badge/crystal-%3E%3D%201.21-blue.svg" alt="Crystal"></a>
 </p>
 
 Declarative GitHub Ruleset Manager.
@@ -18,6 +18,8 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Commands](#commands)
     * [Options](#options)
     * [Exit codes](#exit-codes)
+    * [`gitorules lint`](#gitorules-lint)
+    * [`gitorules migrate`](#gitorules-migrate)
     * [Authentication](#authentication)
 * [Configuration: `.gitorules.yml`](#configuration-gitorulesyml)
     * [File structure](#file-structure)
@@ -33,6 +35,13 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [What gitorules creates](#what-gitorules-creates)
     * [Config lookup logic](#config-lookup-logic)
     * [`gitorules status` output](#gitorules-status-output)
+    * [Labels](#labels)
+* [Workflows sync](#workflows-sync)
+    * [Template layout](#template-layout)
+    * [Allowlist](#allowlist)
+    * [Behavior](#behavior)
+    * [Token scopes](#token-scopes)
+* [JSON output](#json-output)
 * [Development](#development)
 * [Contributing](#contributing)
 * [License](#license)
@@ -51,6 +60,12 @@ gitorules apply
 
 # Generate .gitorules.yml from existing rulesets
 gitorules init --org myorg
+
+# Validate config without calling the API
+gitorules lint
+
+# Convert legacy org/repos/rules to defaults/scopes
+gitorules migrate
 ```
 
 ## Installation
@@ -68,38 +83,45 @@ shards install
 crystal build src/gitorules.cr --release -o gitorules
 ```
 
-Requires Crystal 1.14+.
+Requires Crystal 1.21+.
 
 ## CLI
 
 ```shell
-gitorules <status|apply|diff|init> [options]
+gitorules <status|apply|diff|init|lint|migrate> [options]
 ```
 
 ### Commands
 
-| Command  | Description                                       |
-|----------|---------------------------------------------------|
-| `status` | Show ruleset status for repositories              |
-| `apply`  | Apply ruleset configuration from `.gitorules.yml` |
-| `diff`   | Show pending changes without applying             |
-| `init`   | Generate `.gitorules.yml` from existing rulesets  |
+| Command   | Description                                       |
+|-----------|---------------------------------------------------|
+| `status`  | Show ruleset status for repositories              |
+| `apply`   | Apply ruleset configuration from `.gitorules.yml` |
+| `diff`    | Show pending changes without applying             |
+| `init`    | Generate `.gitorules.yml` from existing rulesets  |
+| `lint`    | Validate config schema and values (offline)       |
+| `migrate` | Convert legacy config to `defaults`/`scopes` shape |
 
 ### Options
 
-| Flag            | Description                                     |
-|-----------------|-------------------------------------------------|
-| `--dry-run`     | Preview apply changes without making them       |
-| `--diff`        | Show pending changes (same as `diff` command)   |
-| `--repo REPO`   | Target a single repository (`owner/name`)       |
-| `--org ORG`     | GitHub organization name (for `init`)           |
-| `--json`        | Machine-readable JSON output                    |
-| `--quiet`       | Suppress all output except errors               |
-| `--yes`         | Skip confirmation prompt and apply immediately  |
-| `--token TOKEN` | GitHub personal access token                    |
-| `--config PATH` | Path to config file (default: `.gitorules.yml`) |
-| `--version`     | Show version                                    |
-| `-h`, `--help`  | Show help                                       |
+| Flag            | Description                                          |
+|-----------------|------------------------------------------------------|
+| `--dry-run`     | Preview apply changes without making them            |
+| `--diff`        | Show pending changes (same as `diff` command)        |
+| `--repo REPO`   | Target a single repository (`owner/name`)            |
+| `--scope NAME`  | Only process repositories in this scope             |
+| `--only LIST`   | Only process subsystems (`branch,labels,workflows`)  |
+| `--exclude REPO`| Exclude repository (repeatable)                      |
+| `--org ORG`     | GitHub organization name (for `init`)                |
+| `--in-place`    | Overwrite config file in place (`migrate` only)      |
+| `--json`        | Machine-readable JSON output                         |
+| `--quiet`       | Suppress all output except errors                    |
+| `--verbose`     | Show unchanged workflows and detailed output         |
+| `--yes`         | Skip confirmation prompt and apply immediately       |
+| `--token TOKEN` | GitHub personal access token                         |
+| `--config PATH` | Path to config file (default: `.gitorules.yml`)      |
+| `--version`     | Show version                                         |
+| `-h`, `--help`  | Show help                                            |
 
 **Apply confirmation:**
 
@@ -108,10 +130,52 @@ scripts/automation.
 
 ### Exit codes
 
-- **0** — all rulesets are up to date (no changes needed)
+- **0** — all rulesets are up to date (no changes needed). For `lint`: config is valid (warnings allowed).
+  For `migrate`: migration succeeded. For `status`/`diff`/`apply`, see below
 - **1** — changes detected (in `diff` mode) or changes were applied (in `apply` mode). Also returned when the
   confirmation prompt is declined (changes exist but were skipped)
-- **2** — execution error (config error, API error, etc.)
+- **2** — execution error (config error, API error, etc.). For `lint`: schema or value errors found.
+  For `migrate`: read, parse, or schema error
+
+### `gitorules lint`
+
+Validates `.gitorules.yml` offline (no API calls, no token required).
+Every error states what is wrong, where (file and key), and how to fix it.
+
+```shell
+gitorules lint --config .gitorules.yml
+```
+
+Checks include:
+
+- merge methods must be the string `only` — `merge: true` is an error, not silently ignored
+- at most one of `merge`/`squash`/`rebase` may be `only`
+- `checks` must be a non-empty list of strings
+- check names without a `Workflow / job` separator produce a warning; verify real names with
+  `gh api repos/<org>/<repo>/commits/HEAD/check-runs`
+- check patterns with glob characters (`*`, `?`, `[`) produce a warning: they match locally
+  and are skipped when creating rulesets
+
+Exit codes: **0** when the file is valid (warnings allowed), **2** on any error.
+
+### `gitorules migrate`
+
+Converts a legacy `org`/`repos`/`rules` (or `orgs`) config to the `defaults`/`scopes` shape:
+
+```shell
+# Print migrated YAML to stdout (source file untouched)
+gitorules migrate --config .gitorules.yml
+
+# Rewrite the source file
+gitorules migrate --config .gitorules.yml --in-place
+```
+
+Single-org input moves shared rules to `defaults` and repositories to `scopes.main`
+(short names expand to full `org/name` entries; bare `org` without `repos` becomes `org/*`).
+Multi-org input becomes one scope per organization. Input already using `scopes`
+is returned unchanged.
+
+Exit codes: **0** on success, **2** on read, parse, or schema errors.
 
 ### Authentication
 
@@ -373,6 +437,164 @@ Checks suffix:
 - `+checks` — required checks present (possibly more)
 - `~checks` — checks exist but don't match config exactly
 - `-checks` — no checks rule at all
+
+## Workflows sync
+
+gitorules syncs GitHub Actions workflow files from local templates via the
+Contents API, keeping `.github/workflows/` identical across repositories.
+
+### Template layout
+
+Declare workflows in `.gitorules.yml` (single-org mode shown; multi-org mode
+supports `orgs.<org>.workflows` with the same shape):
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/ci.yml
+```
+
+Each key is the workflow file name; `source` is the local template path
+(relative to the current directory). The key `ci.yml` syncs to
+`.github/workflows/ci.yml` in every managed repository. Keys that already
+carry the `.github/workflows/` prefix are used as-is.
+
+### Allowlist
+
+Only `.github/workflows/*.yml` (or `*.yaml`) targets are allowed — no
+subdirectories, no path traversal. A disallowed target aborts the run with
+exit code 2 before any API write.
+
+### Behavior
+
+- Matching blob shas are skipped silently (use `--verbose` to show them).
+- Missing remote files are created; differing files are updated with the
+  remote blob sha.
+- `--dry-run` performs zero `PUT` requests and prints intentions instead.
+
+### Token scopes
+
+Workflow sync needs `contents:write` (covered by the classic `repo` scope).
+For fine-grained tokens, grant **Contents** read and write on the managed
+repositories.
+
+### Labels
+Labels apply to every managed repository selected for the run.
+
+```yaml
+org: unurgunite
+repos:
+  - docscribe
+rules:
+  default_branch:
+    merge: only
+labels:
+  - name: bug
+    color: d73a4a
+    description: Something is broken
+  - name: help wanted
+    color: "008672"
+    description: Extra attention is needed
+labels_sync: warn
+```
+
+| Field         | Type     | Description                          |
+|---------------|----------|--------------------------------------|
+| `name`        | `string` | Label name (unique per repository)   |
+| `color`       | `string` | Hex color without `#` (e.g. `d73a4a`) |
+| `description` | `string` | Short description (optional)         |
+
+Color comparison is case-insensitive and ignores a leading `#`;
+a missing description and an empty description are treated as equal.
+
+#### Sync modes (`labels_sync`)
+
+| Mode     | Missing labels | Differing labels | Orphan labels (not in config) |
+|----------|----------------|------------------|-------------------------------|
+| `warn` (default) | Created | Updated | Reported only, never deleted |
+| `prune`  | Created | Updated | Deleted |
+| `ignore` | Created | Updated | Skipped silently |
+
+> [!WARNING]
+> `labels_sync: prune` deletes every label that is not listed in
+> `labels:`, including labels created manually or by other tools.
+> Run `gitorules diff` first and review the `- Delete label` lines
+> before applying with `prune`.
+
+#### Token scopes
+
+Label sync uses the same authentication as rulesets: a Personal
+Access Token with `repo` and `read:org` scopes (or `GITHUB_TOKEN`
+with those scopes). No additional scopes are required.
+
+#### Limiting a run to labels
+
+```shell
+gitorules diff --only labels
+gitorules apply --only labels --yes
+gitorules status --only labels
+```
+
+Use `--only branch` to skip labels. `gitorules apply --dry-run`
+performs zero writes for labels: creations, updates, and prune
+deletions are only reported.
+
+In JSON output (`--json`), each label change is an entry shaped
+`{repo, resource, action, changes[]}` with `resource: "labels"`
+and `action` one of `create`, `update`, `orphan`, `unchanged`.
+
+## JSON output
+
+`--json` emits machine-readable JSON with a unified entry shape across
+`status`, `diff` and `apply`. Every per-resource entry carries:
+
+| Field      | Type       | Description                                              |
+|------------|------------|----------------------------------------------------------|
+| `repo`     | `string`   | Full repository name (`owner/name`)                      |
+| `resource` | `string`   | Ruleset display name (empty for repo-level errors)       |
+| `action`   | `string`   | One of `create`, `update`, `unchanged`, `orphan`, `skip`, `error` |
+| `changes`  | `[string]` | Human-readable differences (empty when none)             |
+
+Legacy fields (`types`, `changes`, `results`, `name`, `exists`,
+`merge_method_ok`, `checks_ok`, `error`) are kept for compatibility.
+
+### Actions
+
+- `create` — ruleset is missing and would be created.
+- `update` — ruleset exists but differs from config.
+- `unchanged` — ruleset matches config.
+- `orphan` — ruleset exists on GitHub but has no matching branch type in config (diff only).
+- `skip` — repo has no configured rules (unknown org in multi-org mode).
+- `error` — API request failed; the entry also carries an `error` message field.
+
+### Examples
+
+```shell
+gitorules status --json | jq '.[0].types.default_branch | {resource, action, changes}'
+# {"resource":"master","action":"unchanged","changes":[]}
+
+gitorules diff --json | jq '.[0].changes[] | {resource, action, changes}'
+# {"resource":"master","action":"create","changes":[]}
+
+gitorules apply --json --dry-run | jq '.[0].results[] | {resource, action, changes}'
+```
+
+### CI usage
+
+```yaml
+- name: Check rulesets
+  run: |
+    gitorules diff --json > diff.json
+    if jq -e '[.[].changes[]? | select(.action == "create" or .action == "update")] | length > 0' diff.json > /dev/null; then
+      echo "Ruleset drift detected"
+      jq -r '.[] | select(.action == "error") | "\(.repo): \(.error)"' diff.json
+      exit 1
+    fi
+```
+
+Performance notes: repository listing follows GitHub `Link` pagination,
+per-repo work runs in a bounded fiber pool (size 10, ordered output),
+and API requests retry with exponential backoff on `429` and `5xx`.
 
 ## Development
 
