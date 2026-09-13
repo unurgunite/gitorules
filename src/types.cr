@@ -195,6 +195,8 @@ struct OrgConfig
   property rules : Hash(String, BranchRuleConfig)?
   # Map of workflow targets to their template sources.
   property workflows : Hash(String, WorkflowConfig)?
+  # Map of file targets to their local sources (allowlisted paths only).
+  property files : Hash(String, WorkflowConfig)?
 end
 
 # A single GitHub issue label.
@@ -280,6 +282,8 @@ struct Config
   property rules : Hash(String, BranchRuleConfig)?
   # Map of workflow targets to template sources (single-org mode).
   property workflows : Hash(String, WorkflowConfig)?
+  # Map of file targets to local sources (single-org mode, allowlisted paths only).
+  property files : Hash(String, WorkflowConfig)?
   # Multi-org configuration (overrides single-org fields).
   property orgs : Hash(String, OrgConfig)?
   # Wanted issue labels applied to every managed repository.
@@ -334,6 +338,26 @@ struct Config
     nil
   end
 
+  # Returns files for a specific repo, considering multi-org config.
+  #
+  # Mirrors `#workflows_for`: single-org mode returns top-level files,
+  # multi-org mode looks up the owning org. Keys are repository-relative
+  # target paths validated against the file allowlist.
+  #
+  # @param repo [String] Full repository name (org/repo)
+  # @return [Hash(String, WorkflowConfig)?] Files for the repo's org
+  def files_for(repo : String) : Hash(String, WorkflowConfig)?
+    return files if files # single-org mode
+
+    org_name = repo.split("/").first?
+    if org_name && (config_orgs = orgs)
+      org_config = config_orgs[org_name]?
+      return org_config.files if org_config
+    end
+
+    nil
+  end
+
   # Returns all known type keys across all orgs (for column headers).
   def all_type_keys : Array(String)
     if scopes = self.scopes
@@ -383,7 +407,9 @@ struct Options
   property org : String? = nil
   # Restrict processing to a single named scope.
   property scope : String? = nil
-  # Subsystem filter (comma-separated: branch,labels,workflows).
+  # Standard CI template for init (ruby, node, crystal, gradle).
+  property template : String? = nil
+  # Subsystem filter (comma-separated: branch,labels,workflows,files).
   property only : String? = nil
   # Repositories to exclude (owner/name, exact or glob).
   property exclude : Array(String) = [] of String
