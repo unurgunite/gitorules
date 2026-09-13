@@ -156,14 +156,27 @@ module Gitorules
         end
       end
 
-      def diff(repos : Array(String), quiet : Bool = false, io : IO = STDOUT, only : String? = nil)
+      # True when workflow work must be skipped for an `only` filter.
+      private def workflows_skipped?(only : String?) : Bool
+        parts = only_parts(only)
+        return false if parts.nil?
+        !parts.includes?("workflows")
+      end
+
+      # True when workflow sync is wanted for an `only` filter.
+      private def workflows_wanted?(only : String?) : Bool
+        !workflows_skipped?(only)
+      end
+
+      def diff(repos : Array(String), quiet : Bool = false, io : IO = STDOUT, only : String? = nil, verbose : Bool = false)
+        validate_workflows!(repos)
         total = repos.size
         is_tty = colorize?(io)
         outputs = Concurrent.map_ordered(repos) do |repo, idx|
           prefix = "[#{idx + 1}/#{total}] "
           buf = TtyMemory.new(is_tty)
           begin
-            diff_repo(repo, buf, prefix, quiet, only)
+            diff_repo(repo, buf, prefix, quiet, only, verbose)
           rescue ex
             buf.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
           end
@@ -173,7 +186,16 @@ module Gitorules
         io.puts "Done: #{repos.size} repos processed"
       end
 
+      # Validates workflow config for all repos before any API write.
+      #
+      # Raises `WorkflowError` (CLI maps it to exit 2) when a target
+      # path falls outside the `.github/workflows/*.yml` allowlist.
+      private def validate_workflows!(repos : Array(String))
+        WorkflowResource.new(@client).validate_all!(@config, repos)
+      end
+
       def diff_json(repos : Array(String), io : IO = STDOUT, only : String? = nil)
+        validate_workflows!(repos)
         results = Concurrent.map_ordered(repos) do |repo, _idx|
           diff_repo_json_string(repo, only)
         end
@@ -209,7 +231,8 @@ module Gitorules
         1
       end
 
-      def apply(repos : Array(String), dry_run : Bool = false, quiet : Bool = false, io : IO = STDOUT, only : String? = nil)
+      def apply(repos : Array(String), dry_run : Bool = false, quiet : Bool = false, io : IO = STDOUT, only : String? = nil, verbose : Bool = false)
+        validate_workflows!(repos)
         total = repos.size
         is_tty = colorize?(io)
         outputs = Concurrent.map_ordered(repos) do |repo, idx|
@@ -217,7 +240,7 @@ module Gitorules
           buf = TtyMemory.new(is_tty)
           failed = false
           begin
-            apply_repo(repo, dry_run, buf, prefix, quiet, only)
+            apply_repo(repo, dry_run, buf, prefix, quiet, only, verbose)
           rescue ex
             buf.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
             failed = true
@@ -234,6 +257,7 @@ module Gitorules
       end
 
       def apply_json(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT, only : String? = nil)
+        validate_workflows!(repos)
         results = Concurrent.map_ordered(repos) do |repo, _idx|
           apply_repo_json_string(repo, dry_run, only)
         end
@@ -578,9 +602,10 @@ module Gitorules
         end
       end
 
-      private def diff_repo(repo : String, io : IO, prefix : String = "", quiet : Bool = false, only : String? = nil)
+      private def diff_repo(repo : String, io : IO, prefix : String = "", quiet : Bool = false, only : String? = nil, verbose : Bool = false)
         diff_repo_rulesets(repo, io, prefix, quiet) unless branch_skipped?(only)
         diff_repo_labels(repo, io, prefix, quiet) if labels_wanted?(only)
+        diff_repo_workflows(repo, io, quiet, verbose) if workflows_wanted?(only)
       end
 
       private def diff_repo_rulesets(repo : String, io : IO, prefix : String, quiet : Bool)
@@ -608,6 +633,23 @@ module Gitorules
         label_resource.diff(repo, quiet, io, prefix)
       rescue ex
         io.puts "#{prefix}#{repo}: labels Error: #{ex.message}" unless quiet
+      end
+
+      # Prints pending workflow changes for a repo (no writes).
+      private def diff_repo_workflows(repo : String, io : IO, quiet : Bool, verbose : Bool)
+        workflows = @config.workflows_for(repo)
+        return if workflows.nil? || workflows.empty?
+        plans = WorkflowResource.new(@client).plan_repo(repo, workflows)
+        plans.each do |plan|
+          case plan.action
+          when "create"
+            io.puts "  #{diff_add("Create workflow '#{plan.target}'", io)}" unless quiet
+          when "update"
+            io.puts "  #{diff_change("Update workflow '#{plan.target}'", io)}" unless quiet
+          when "unchanged"
+            io.puts "  #{diff_unchanged("workflow '#{plan.target}' up to date", io)}" if verbose && !quiet
+          end
+        end
       end
 
       private def render_text_entry(entry : DiffEntry, io : IO, quiet : Bool = false)
@@ -645,6 +687,7 @@ module Gitorules
             json.array do
               render_diff_branch_entries(json, repo, existing, only) unless branch_skipped?(only)
               label_entries.each { |e| label_resource.write_json_entry(json, repo, e) }
+              render_diff_workflow_entries(json, repo, only) if workflows_wanted?(only)
             end
           end
         end
@@ -707,6 +750,35 @@ module Gitorules
           end
         else
           render_json_update(json, entry)
+        end
+      end
+
+      # Appends workflow plans to a diff JSON changes array.
+      #
+      # Report-only: plans are computed via GETs, no PUTs are performed.
+      private def render_diff_workflow_entries(json : JSON::Builder, repo : String, only : String?)
+        workflows = @config.workflows_for(repo)
+        return if workflows.nil? || workflows.empty?
+        plans = WorkflowResource.new(@client).plan_repo(repo, workflows)
+        plans.each do |plan|
+          write_workflow_json_entry(json, plan)
+        end
+      rescue ex
+        json.object do
+          json.field "resource", ""
+          json.field "action", "error"
+          json.field "changes", [] of String
+          json.field "error", ex.message
+        end
+      end
+
+      private def write_workflow_json_entry(json : JSON::Builder, plan : WorkflowPlan, dry_run : Bool = false)
+        json.object do
+          json.field "resource", plan.target
+          json.field "action", plan.action
+          json.field "name", plan.target
+          json.field "changes", [] of String
+          json.field "dry_run", true if dry_run
         end
       end
 
@@ -866,8 +938,29 @@ module Gitorules
                 end
               end
               label_entries.each { |e| label_resource.write_json_entry(json, repo, e, dry_run) }
+              render_apply_workflow_entries(json, repo, only, dry_run) if workflows_wanted?(only)
             end
           end
+        end
+      end
+
+      # Appends workflow plans to an apply JSON results array.
+      #
+      # Report-only: plans are computed via GETs, no PUTs are performed
+      # (consistent with ruleset JSON handling).
+      private def render_apply_workflow_entries(json : JSON::Builder, repo : String, only : String?, dry_run : Bool)
+        workflows = @config.workflows_for(repo)
+        return if workflows.nil? || workflows.empty?
+        plans = WorkflowResource.new(@client).plan_repo(repo, workflows)
+        plans.each do |plan|
+          write_workflow_json_entry(json, plan, dry_run)
+        end
+      rescue ex
+        json.object do
+          json.field "resource", ""
+          json.field "action", "error"
+          json.field "changes", [] of String
+          json.field "error", ex.message
         end
       end
 
@@ -901,7 +994,7 @@ module Gitorules
         end
       end
 
-      private def apply_repo(repo : String, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false, only : String? = nil)
+      private def apply_repo(repo : String, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false, only : String? = nil, verbose : Bool = false)
         unless branch_skipped?(only)
           existing = @client.list_rulesets(repo)
 
@@ -917,6 +1010,42 @@ module Gitorules
 
         if labels_wanted?(only)
           label_resource.apply(repo, dry_run, quiet, io, prefix)
+        end
+
+        if workflows_wanted?(only)
+          apply_workflows(repo, dry_run, io, prefix, quiet, verbose)
+        end
+      end
+
+      # Syncs workflows for a repo via the Contents API.
+      #
+      # Dry-run mode performs zero PUTs and prints intentions instead.
+      # Matching shas are skipped silently unless verbose.
+      private def apply_workflows(repo : String, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false, verbose : Bool = false)
+        workflows = @config.workflows_for(repo)
+        return if workflows.nil? || workflows.empty?
+        plans = WorkflowResource.new(@client).sync_repo(repo, workflows, dry_run)
+        plans.each do |plan|
+          report_workflow_plan(repo, plan, dry_run, io, prefix, quiet, verbose)
+        end
+      end
+
+      private def report_workflow_plan(repo : String, plan : WorkflowPlan, dry_run : Bool, io : IO, prefix : String, quiet : Bool, verbose : Bool)
+        case plan.action
+        when "create"
+          report_workflow_write(repo, plan.target, "create", "Created", dry_run, io, prefix, quiet)
+        when "update"
+          report_workflow_write(repo, plan.target, "update", "Updated", dry_run, io, prefix, quiet)
+        when "unchanged"
+          io.puts "#{prefix}#{repo}: Workflow '#{plan.target}' up to date" if verbose && !quiet
+        end
+      end
+
+      private def report_workflow_write(repo : String, target : String, present : String, past : String, dry_run : Bool, io : IO, prefix : String, quiet : Bool)
+        if dry_run
+          io.puts "#{prefix}#{repo}: Would #{present} workflow '#{target}'" unless quiet
+        else
+          io.puts "#{prefix}#{repo}: #{past} workflow '#{target}'" unless quiet
         end
       end
 

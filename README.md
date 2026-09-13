@@ -34,6 +34,11 @@ Manage branch protection rules across all your repositories from a single YAML c
     * [Config lookup logic](#config-lookup-logic)
     * [`gitorules status` output](#gitorules-status-output)
     * [Labels](#labels)
+* [Workflows sync](#workflows-sync)
+    * [Template layout](#template-layout)
+    * [Allowlist](#allowlist)
+    * [Behavior](#behavior)
+    * [Token scopes](#token-scopes)
 * [JSON output](#json-output)
 * [Development](#development)
 * [Contributing](#contributing)
@@ -98,6 +103,7 @@ gitorules <status|apply|diff|init> [options]
 | `--org ORG`     | GitHub organization name (for `init`)           |
 | `--json`        | Machine-readable JSON output                    |
 | `--quiet`       | Suppress all output except errors               |
+| `--verbose`     | Show unchanged workflows and detailed output    |
 | `--yes`         | Skip confirmation prompt and apply immediately  |
 | `--token TOKEN` | GitHub personal access token                    |
 | `--config PATH` | Path to config file (default: `.gitorules.yml`) |
@@ -377,9 +383,47 @@ Checks suffix:
 - `~checks` — checks exist but don't match config exactly
 - `-checks` — no checks rule at all
 
-### Labels
+## Workflows sync
 
-gitorules can synchronize GitHub issue labels from the same config file.
+gitorules syncs GitHub Actions workflow files from local templates via the
+Contents API, keeping `.github/workflows/` identical across repositories.
+
+### Template layout
+
+Declare workflows in `.gitorules.yml` (single-org mode shown; multi-org mode
+supports `orgs.<org>.workflows` with the same shape):
+
+```yaml
+workflows:
+  ci.yml:
+    source: templates/ci.yml
+```
+
+Each key is the workflow file name; `source` is the local template path
+(relative to the current directory). The key `ci.yml` syncs to
+`.github/workflows/ci.yml` in every managed repository. Keys that already
+carry the `.github/workflows/` prefix are used as-is.
+
+### Allowlist
+
+Only `.github/workflows/*.yml` (or `*.yaml`) targets are allowed — no
+subdirectories, no path traversal. A disallowed target aborts the run with
+exit code 2 before any API write.
+
+### Behavior
+
+- Matching blob shas are skipped silently (use `--verbose` to show them).
+- Missing remote files are created; differing files are updated with the
+  remote blob sha.
+- `--dry-run` performs zero `PUT` requests and prints intentions instead.
+
+### Token scopes
+
+Workflow sync needs `contents:write` (covered by the classic `repo` scope).
+For fine-grained tokens, grant **Contents** read and write on the managed
+repositories.
+
+### Labels
 Labels apply to every managed repository selected for the run.
 
 ```yaml

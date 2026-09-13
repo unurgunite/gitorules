@@ -21,16 +21,16 @@ module Gitorules
       @branch_rules.status_json(repos, io, only)
     end
 
-    def diff(repos : Array(String), quiet : Bool = false, io : IO = STDOUT, only : String? = nil)
-      @branch_rules.diff(repos, quiet, io, only)
+    def diff(repos : Array(String), quiet : Bool = false, io : IO = STDOUT, only : String? = nil, verbose : Bool = false)
+      @branch_rules.diff(repos, quiet, io, only, verbose)
     end
 
     def diff_json(repos : Array(String), io : IO = STDOUT, only : String? = nil)
       @branch_rules.diff_json(repos, io, only)
     end
 
-    def apply(repos : Array(String), dry_run : Bool = false, quiet : Bool = false, io : IO = STDOUT, only : String? = nil)
-      @branch_rules.apply(repos, dry_run, quiet, io, only)
+    def apply(repos : Array(String), dry_run : Bool = false, quiet : Bool = false, io : IO = STDOUT, only : String? = nil, verbose : Bool = false)
+      @branch_rules.apply(repos, dry_run, quiet, io, only, verbose)
     end
 
     def apply_json(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT, only : String? = nil)
