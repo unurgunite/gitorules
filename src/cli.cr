@@ -47,9 +47,11 @@ module Gitorules
       in_place = false
       help_text = ""
 
-      OptionParser.parse(args) do |parser|
+      normalized = normalize_scope_verify(args)
+
+      OptionParser.parse(normalized) do |parser|
         help_text = parser.to_s
-        parser.banner = "Usage: gitorules <status|apply|diff|init|lint|migrate> [options]\n\nCommands:\n"
+        parser.banner = "Usage: gitorules <status|apply|diff|init|lint|migrate|verify> [options]\n\nCommands:\n"
 
         parser.on("status", "Show branch status for repositories") do
           options.mode = "status"
@@ -73,6 +75,10 @@ module Gitorules
 
         parser.on("migrate", "Convert legacy config to defaults/scopes shape") do
           options.mode = "migrate"
+        end
+
+        parser.on("verify", "Verify required checks are produced by workflows") do
+          options.mode = "verify"
         end
 
         parser.separator "\nOptions:\n"
@@ -181,6 +187,10 @@ module Gitorules
 
       if options.mode == "migrate"
         return Migrator.migrate_file(config_path, in_place)
+      end
+
+      if options.mode == "verify"
+        return Verifier.verify_file(config_path, options.scope, options.json?)
       end
 
       if in_place
@@ -316,6 +326,17 @@ module Gitorules
     rescue ex : ArgumentError
       STDERR.puts "Error: #{ex.message}"
       raise ExitSignal.new(2)
+    end
+
+    # Normalizes `scope verify` to `verify`.
+    #
+    # Accepts both `gitorules verify` and `gitorules scope verify`
+    # spellings; extra flags are preserved in order.
+    private def self.normalize_scope_verify(args : Array(String)) : Array(String)
+      if args.size >= 2 && args[0] == "scope" && args[1] == "verify"
+        return ["verify"] + args[2..]
+      end
+      args
     end
 
     private def self.execute_command(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO = STDIN, groups : Hash(String, Array(String))? = nil) : Int32

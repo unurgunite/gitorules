@@ -95,6 +95,7 @@ module Gitorules
 
       lint_top_level_types(str_map, path, errors)
       lint_has_any_rules(str_map, path, errors)
+      lint_consistency(content, path, errors, warnings)
 
       LintResult.new(errors, warnings)
     rescue ex : YAML::ParseException
@@ -124,6 +125,25 @@ module Gitorules
     private def self.lint_has_any_rules(str_map : Hash(String, YAML::Any), path : String, errors : Array(String)) : Nil
       return if str_map["rules"]? || str_map["orgs"]? || str_map["defaults"]? || str_map["scopes"]?
       errors << "in #{path}: no rules found. Fix: add a `rules:` section, an `orgs:` section, or a `defaults:`/`scopes:` pair."
+    end
+
+    # Cross-checks required checks against synced workflow templates.
+    #
+    # Every exact check must be produced by a job in the scope
+    # workflows. Missing checks become errors, extra jobs become
+    # warnings. Scopes without workflows are skipped.
+    private def self.lint_consistency(content : String, path : String, errors : Array(String), warnings : Array(String)) : Nil
+      config = Config.from_yaml(content)
+      base_dir = begin
+        File.dirname(File.expand_path(path))
+      rescue
+        Dir.current
+      end
+      _, consistency_errors, consistency_warnings = Consistency.check_all(config, base_dir, path)
+      errors.concat(consistency_errors)
+      warnings.concat(consistency_warnings)
+    rescue
+      # Config parsing failed; schema errors already reported.
     end
 
     private def self.lint_orgs(orgs : YAML::Any, path : String, errors : Array(String), warnings : Array(String)) : Nil
