@@ -11,15 +11,24 @@ module Gitorules
     def status(repos : Array(String), quiet : Bool = false, io : IO = STDOUT)
       types = @config.all_type_keys
       status_print_header(types, io) unless quiet
-      errors = 0
-      repos.each_with_index do |repo, i|
-        prefix = "[#{i + 1}/#{repos.size}] "
+      total = repos.size
+      is_tty = colorize?(io)
+      outputs = Concurrent.map_ordered(repos) do |repo, idx|
+        prefix = "[#{idx + 1}/#{total}] "
+        buf = TtyMemory.new(is_tty)
+        failed = false
         begin
-          status_repo_line(repo, types, io, prefix, quiet)
+          status_repo_line(repo, types, buf, prefix, quiet)
         rescue ex
-          io.puts error_io_line(repo, types, prefix, io) unless quiet
-          errors += 1
+          buf.puts error_io_line(repo, types, prefix, buf) unless quiet
+          failed = true
         end
+        {buf.to_s, failed}
+      end
+      errors = 0
+      outputs.each do |(text, failed)|
+        io.print(text)
+        errors += 1 if failed
       end
       n = repos.size
       if errors == 0
@@ -102,16 +111,19 @@ module Gitorules
 
     def status_json(repos : Array(String), io : IO = STDOUT)
       types = @config.all_type_keys
-      io.puts(JSON.build do |json|
-        json.array do
-          repos.each do |repo|
-            json.object do
-              json.field "repo", repo
-              status_json_repo(json, repo, types)
-            end
-          end
+      results = Concurrent.map_ordered(repos) do |repo, _idx|
+        status_repo_json_string(repo, types)
+      end
+      io.puts("[#{results.join(",")}]")
+    end
+
+    private def status_repo_json_string(repo : String, types : Array(String)) : String
+      JSON.build do |json|
+        json.object do
+          json.field "repo", repo
+          status_json_repo(json, repo, types)
         end
-      end)
+      end
     end
 
     private def status_json_repo(json : JSON::Builder, repo : String, types : Array(String))
@@ -124,26 +136,51 @@ module Gitorules
             names = type_match_names(type, rule_config)
             rs = rulesets.find(&.name.in?(names))
             json.field type do
-              status_json_type(json, repo, rs, rule_config)
+              status_json_type(json, repo, rs, rule_config, type)
             end
           end
         end
       end
     rescue ex
+      json.field "resource", ""
+      json.field "action", "error"
+      json.field "changes", [] of String
       json.field "error", ex.message
     end
 
-    private def status_json_type(json : JSON::Builder, repo : String, rs : Ruleset?, rule_config : BranchRuleConfig?)
+    private def status_json_type(json : JSON::Builder, repo : String, rs : Ruleset?, rule_config : BranchRuleConfig?, type : String? = nil)
+      wanted_name = type ? type_display_name(type, rule_config) : rs.try(&.name) || "unknown"
+      if rules_missing_for_repo?(repo)
+        resource = rs.try(&.name) || wanted_name
+        json.object do
+          json.field "exists", !rs.nil?
+          json.field "name", rs.name if rs
+          json.field "resource", resource
+          json.field "action", "skip"
+          json.field "changes", [] of String
+        end
+        return
+      end
       id = rs.try(&.id)
       unless id
-        json.object { json.field "exists", false }
+        json.object do
+          json.field "exists", false
+          json.field "resource", wanted_name
+          json.field "action", "create"
+          json.field "changes", [] of String
+        end
         return
       end
 
       begin
         full = @client.get_ruleset(repo, id)
-      rescue
-        json.object { json.field "exists", false }
+      rescue ex
+        json.object do
+          json.field "exists", false
+          json.field "resource", rs.try(&.name) || wanted_name
+          json.field "action", "error"
+          json.field "changes", [ex.message.to_s]
+        end
         return
       end
 
@@ -151,63 +188,101 @@ module Gitorules
       params = pr_rule.try(&.parameters)
       methods = params.try { |p| p["allowed_merge_methods"]?.try(&.as_a) }
 
+      method = methods.try(&.first?.to_s)
+      expected = rule_config.try(&.merge_method)
+      method_ok : Bool? = nil
+      if methods
+        method_ok = expected == method || !expected
+      end
+
+      expected_checks = rule_config.try(&.checks)
+      checks_ok : Bool? = nil
+      actual_str = [] of String
+      if expected_checks
+        checks_rule = full.rules.find { |r| r.type == "required_status_checks" }
+        cparams = checks_rule.try(&.parameters)
+        actual = cparams.try { |p| p["required_status_checks"]?.try(&.as_a).try { |a| a.map { |c| c.as_h["context"]?.try(&.to_s) } } }
+        actual_str = actual.try(&.compact) || [] of String
+        if rule_config.try(&.glob_checks?)
+          checks_ok = rule_config.try(&.checks_match?(actual_str)) || false
+        else
+          checks_ok = actual == expected_checks
+        end
+      end
+
+      changes = [] of String
+      if method_ok == false && method
+        changes << "merge_method: expected #{expected || "any"}, got #{method}"
+      end
+      if checks_ok == false
+        changes << "checks: mismatch (expected #{expected_checks}, got #{actual_str.empty? ? "none" : actual_str.join(", ")})"
+      end
+      action = if method_ok == false || checks_ok == false
+                 "update"
+               else
+                 "unchanged"
+               end
+
       json.object do
         json.field "exists", true
         json.field "name", full.name
+        json.field "resource", full.name
 
-        if methods
-          method = methods.first?.to_s
-          expected = rule_config.try(&.merge_method)
-          method_ok = expected == method || !expected
+        if methods && method
           json.field "merge_method", method
           json.field "merge_method_ok", method_ok
         end
 
-        expected_checks = rule_config.try(&.checks)
         if expected_checks
-          checks_rule = full.rules.find { |r| r.type == "required_status_checks" }
-          params = checks_rule.try(&.parameters)
-          actual = params.try { |p| p["required_status_checks"]?.try(&.as_a).try { |a| a.map { |c| c.as_h["context"]?.try(&.to_s) } } }
-          checks_ok = if rule_config.try(&.glob_checks?)
-                        actual_str = actual.try(&.compact) || [] of String
-                        rule_config.try(&.checks_match?(actual_str)) || false
-                      else
-                        actual == expected_checks
-                      end
           json.field "checks_ok", checks_ok
         end
+        json.field "action", action
+        json.field "changes", changes
       end
     end
 
+    private def rules_missing_for_repo?(repo : String) : Bool
+      @config.rules_for(repo).nil?
+    end
+
     def diff(repos : Array(String), quiet : Bool = false, io : IO = STDOUT)
-      repos.each_with_index do |repo, i|
-        prefix = "[#{i + 1}/#{repos.size}] "
+      total = repos.size
+      is_tty = colorize?(io)
+      outputs = Concurrent.map_ordered(repos) do |repo, idx|
+        prefix = "[#{idx + 1}/#{total}] "
+        buf = TtyMemory.new(is_tty)
         begin
-          diff_repo(repo, io, prefix, quiet)
+          diff_repo(repo, buf, prefix, quiet)
         rescue ex
-          io.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
+          buf.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
         end
+        buf.to_s
       end
+      outputs.each { |text| io.print(text) }
       io.puts "Done: #{repos.size} repos processed"
     end
 
     def diff_json(repos : Array(String), io : IO = STDOUT)
-      errors = 0
-      io.puts(JSON.build do |json|
-        json.array do
-          repos.each do |repo|
-            begin
-              diff_json_repo(json, repo)
-            rescue ex
-              json.object do
-                json.field "repo", repo
-                json.field "error", ex.message
-              end
-              errors += 1
-            end
+      results = Concurrent.map_ordered(repos) do |repo, _idx|
+        diff_repo_json_string(repo)
+      end
+      io.puts("[#{results.join(",")}]")
+    end
+
+    private def diff_repo_json_string(repo : String) : String
+      JSON.build do |json|
+        begin
+          diff_json_repo(json, repo)
+        rescue ex
+          json.object do
+            json.field "repo", repo
+            json.field "resource", ""
+            json.field "action", "error"
+            json.field "changes", [] of String
+            json.field "error", ex.message
           end
         end
-      end)
+      end
     end
 
     private def diff_json_repo(json : JSON::Builder, repo : String)
@@ -216,6 +291,9 @@ module Gitorules
       rescue ex
         json.object do
           json.field "repo", repo
+          json.field "resource", ""
+          json.field "action", "error"
+          json.field "changes", [] of String
           json.field "error", ex.message
         end
         return
@@ -240,6 +318,13 @@ module Gitorules
                   diff_json_create(json, wanted)
                 end
               end
+            else
+              json.object do
+                json.field "action", "skip"
+                json.field "name", ""
+                json.field "resource", ""
+                json.field "changes", ["no rules configured for repo"]
+              end
             end
 
             existing.each do |rs|
@@ -255,6 +340,8 @@ module Gitorules
       json.object do
         json.field "action", "create"
         json.field "name", wanted.name
+        json.field "resource", wanted.name
+        json.field "changes", [] of String
         json.field "rules", wanted.rules.map(&.type)
         if conditions = wanted.conditions
           if ref = conditions["ref_name"]?
@@ -315,9 +402,8 @@ module Gitorules
       json.object do
         json.field "action", changes.empty? ? "unchanged" : "update"
         json.field "name", wanted.name
-        unless changes.empty?
-          json.field "changes", changes
-        end
+        json.field "resource", wanted.name
+        json.field "changes", changes
       end
     end
 
@@ -325,6 +411,8 @@ module Gitorules
       json.object do
         json.field "action", "orphan"
         json.field "name", name
+        json.field "resource", name
+        json.field "changes", [] of String
       end
     end
 
@@ -457,37 +545,50 @@ module Gitorules
     end
 
     def apply(repos : Array(String), dry_run : Bool = false, quiet : Bool = false, io : IO = STDOUT)
-      errors = 0
-      repos.each_with_index do |repo, i|
-        prefix = "[#{i + 1}/#{repos.size}] "
+      total = repos.size
+      is_tty = colorize?(io)
+      outputs = Concurrent.map_ordered(repos) do |repo, idx|
+        prefix = "[#{idx + 1}/#{total}] "
+        buf = TtyMemory.new(is_tty)
+        failed = false
         begin
-          apply_repo(repo, dry_run, io, prefix, quiet)
+          apply_repo(repo, dry_run, buf, prefix, quiet)
         rescue ex
-          io.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
-          errors += 1
+          buf.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
+          failed = true
         end
+        {buf.to_s, failed}
+      end
+      errors = 0
+      outputs.each do |(text, failed)|
+        io.print(text)
+        errors += 1 if failed
       end
       n = repos.size
       io.puts "Done: #{n} repos processed, #{errors} error(s)"
     end
 
     def apply_json(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT)
-      errors = 0
-      io.puts(JSON.build do |json|
-        json.array do
-          repos.each do |repo|
-            begin
-              apply_json_repo(json, repo, dry_run)
-            rescue ex
-              json.object do
-                json.field "repo", repo
-                json.field "error", ex.message
-              end
-              errors += 1
-            end
+      results = Concurrent.map_ordered(repos) do |repo, _idx|
+        apply_repo_json_string(repo, dry_run)
+      end
+      io.puts("[#{results.join(",")}]")
+    end
+
+    private def apply_repo_json_string(repo : String, dry_run : Bool) : String
+      JSON.build do |json|
+        begin
+          apply_json_repo(json, repo, dry_run)
+        rescue ex
+          json.object do
+            json.field "repo", repo
+            json.field "resource", ""
+            json.field "action", "error"
+            json.field "changes", [] of String
+            json.field "error", ex.message
           end
         end
-      end)
+      end
     end
 
     private def apply_json_repo(json : JSON::Builder, repo : String, dry_run : Bool)
@@ -496,6 +597,9 @@ module Gitorules
       rescue ex
         json.object do
           json.field "repo", repo
+          json.field "resource", ""
+          json.field "action", "error"
+          json.field "changes", [] of String
           json.field "error", ex.message
         end
         return
@@ -512,6 +616,13 @@ module Gitorules
                 found = existing.find(&.name.in?(names))
                 apply_json_ruleset(json, repo, found, wanted, config, dry_run)
               end
+            else
+              json.object do
+                json.field "action", "skip"
+                json.field "name", ""
+                json.field "resource", ""
+                json.field "changes", ["no rules configured for repo"]
+              end
             end
           end
         end
@@ -524,6 +635,8 @@ module Gitorules
         json.object do
           json.field "action", action
           json.field "name", wanted.name
+          json.field "resource", wanted.name
+          json.field "changes", [] of String
           json.field "dry_run", true if dry_run
           json.field "id", existing.id if existing && existing.id
           json_apply_checks_skipped(json, action, config)
@@ -534,6 +647,8 @@ module Gitorules
       json.object do
         json.field "action", "update"
         json.field "name", wanted.name
+        json.field "resource", wanted.name
+        json.field "changes", [] of String
         json.field "id", existing.id
       end
     end

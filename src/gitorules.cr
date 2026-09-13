@@ -1,4 +1,6 @@
 require "./types"
+require "./concurrent"
+require "./json_entry"
 require "./github"
 require "./config"
 require "./engine"

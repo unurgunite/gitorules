@@ -25,6 +25,11 @@ module Gitorules
   class GitHubClient
     BASE_URL = "https://api.github.com"
 
+    # Maximum retry attempts for rate-limit and server errors.
+    MAX_RETRIES = 3
+    # Base delay in seconds for exponential backoff (doubled per attempt).
+    RETRY_BASE_DELAY = 0.1
+
     # Cached installation token with expiry time.
     private record AppInstallationToken, token : String, expires_at : Time do
       def expired? : Bool
@@ -188,8 +193,75 @@ module Gitorules
     end
 
     def list_repos(org : String, type : String = "owner") : Array(String)
-      body = get("/orgs/#{org}/repos?per_page=100&type=#{type}")
-      Array(JSON::Any).from_json(body).map(&.["name"].to_s)
+      names = [] of String
+      url : String? = "#{BASE_URL}/orgs/#{org}/repos?per_page=100&type=#{type}"
+      while current = url
+        resp = do_request(:get, current)
+        handle_errors(resp)
+        Array(JSON::Any).from_json(resp.body).each do |entry|
+          names << entry["name"].to_s
+        end
+        url = next_page_url(resp.headers["Link"]?)
+      end
+      names
+    end
+
+    # Extracts the `rel="next"` URL from a GitHub Link header.
+    #
+    # @param link_header [String?] Raw Link header value or nil
+    # @return [String?] Next page URL or nil when absent
+    private def next_page_url(link_header : String?) : String?
+      return nil unless link_header
+      link_header.split(",").each do |part|
+        if m = part.match(/<([^>]+)>\s*;\s*rel="([^"]+)"/)
+          return m[1] if m[2] == "next"
+        end
+      end
+      nil
+    end
+
+    # Returns true for statuses worth retrying with backoff.
+    private def retryable_status?(code : Int32) : Bool
+      code == 429 || (500..599).includes?(code)
+    end
+
+    # Computes backoff delay, honoring Retry-After when present.
+    private def retry_delay(attempt : Int32, resp : HTTP::Client::Response?) : Time::Span
+      if resp && (retry_after = resp.headers["Retry-After"]?)
+        if secs = retry_after.to_f?
+          return secs.clamp(0.0, 5.0).seconds
+        end
+      end
+      (RETRY_BASE_DELAY * (2 ** attempt)).seconds
+    end
+
+    # Performs an HTTP request with retry on 429/5xx.
+    #
+    # @param method [Symbol] One of :get, :post, :put
+    # @param url [String] Full URL to request
+    # @param body [String?] Optional request body
+    # @return [HTTP::Client::Response] Raw response (unvalidated)
+    private def do_request(method : Symbol, url : String, body : String? = nil) : HTTP::Client::Response
+      attempts = 0
+      loop do
+        ensure_token!
+        resp = case method
+               when :get
+                 HTTP::Client.get(url, headers: @headers)
+               when :post
+                 HTTP::Client.post(url, headers: @headers, body: body)
+               when :put
+                 HTTP::Client.put(url, headers: @headers, body: body)
+               else
+                 raise "Unsupported HTTP method #{method}"
+               end
+        if retryable_status?(resp.status_code) && attempts < MAX_RETRIES
+          sleep retry_delay(attempts, resp)
+          attempts += 1
+          next
+        end
+        return resp
+      end
     end
 
     # Performs an authenticated GET request.
@@ -198,22 +270,22 @@ module Gitorules
     # @return [String] Response body
     # @raise [RuntimeError] On API error via handle_errors
     private def get(path : String) : String
-      ensure_token!
-      resp = HTTP::Client.get("#{BASE_URL}#{path}", headers: @headers)
+      url = path.starts_with?("http") ? path : "#{BASE_URL}#{path}"
+      resp = do_request(:get, url)
       handle_errors(resp)
       resp.body
     end
 
     private def post(path : String, body : String) : String
-      ensure_token!
-      resp = HTTP::Client.post("#{BASE_URL}#{path}", headers: @headers, body: body)
+      url = path.starts_with?("http") ? path : "#{BASE_URL}#{path}"
+      resp = do_request(:post, url, body)
       handle_errors(resp)
       resp.body
     end
 
     private def put(path : String, body : String) : String
-      ensure_token!
-      resp = HTTP::Client.put("#{BASE_URL}#{path}", headers: @headers, body: body)
+      url = path.starts_with?("http") ? path : "#{BASE_URL}#{path}"
+      resp = do_request(:put, url, body)
       handle_errors(resp)
       resp.body
     end
