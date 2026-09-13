@@ -170,6 +170,8 @@ end
 # Configuration for a single workflow file sync entry.
 #
 # Maps a workflow target (e.g. "ci.yml") to a local template file.
+# Optional `extra_steps` points at a local YAML file with additional
+# steps appended at the anchor marker in the base template.
 struct WorkflowConfig
   include YAML::Serializable
 
@@ -178,6 +180,10 @@ struct WorkflowConfig
 
   # Local template file path (e.g. "templates/ci.yml").
   property source : String?
+  # Local file with extra steps appended at the anchor (optional).
+  property extra_steps : String?
+  # Custom anchor marker name (defaults to "gitorules:extra-steps").
+  property extra_steps_anchor : String?
 end
 
 # Per-org configuration within a multi-org config.

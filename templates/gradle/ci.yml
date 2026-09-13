@@ -1,0 +1,70 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Install Crystal 1.21.0
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.21.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Check version consistency
+        run: |
+          set -euo pipefail
+          VERSION="$(grep '^pluginVersion=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          if [ -z "$VERSION" ]; then
+            echo "pluginVersion not found in gradle.properties. Fix: set pluginVersion=x.y.z."
+            exit 1
+          fi
+          MSG="$(git log -1 --pretty=%B)"
+          TAG="$(echo "$MSG" | grep -o '\[[0-9]*\.[0-9]*\.[0-9]*\]' | head -n1 | tr -d '[]' || true)"
+          if [ -z "$TAG" ]; then
+            echo "Commit message must contain a version tag [x.y.z], got: $MSG"
+            exit 1
+          fi
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "gradle.properties pluginVersion ($VERSION) does not match commit tag [$TAG]."
+            exit 1
+          fi
+          if ! grep -Eq "^## \[?${TAG}\]?|^## ${TAG}" CHANGELOG.md; then
+            echo "CHANGELOG.md has no section for $TAG. Fix: add a '## [$TAG]' section."
+            exit 1
+          fi
+          echo "Version consistent: $VERSION"
+
+      # Extension point: per-repo extra steps are appended after this line.
+      # Configure `extra_steps` in .gitorules.yml to inject project-specific
+      # steps here (for example a change-notes check against plugin.xml).
+      # The base template stays intact; overrides are explicit files.
+      # gitorules:extra-steps
+
+      - name: Test
+        run: ./gradlew test
+
+      - name: Verify plugin
+        run: ./gradlew verifyPlugin
+
+      - name: Build plugin
+        run: ./gradlew buildPlugin
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: build/libs/*.zip
