@@ -192,6 +192,49 @@ module Gitorules
       Array(JSON::Any).from_json(body).map(&.["name"].to_s)
     end
 
+    # Reads a repository file via the Contents API.
+    #
+    # Returns the blob sha and the decoded content, or nil when the
+    # file does not exist (404). Other API errors raise.
+    #
+    # @param repo [String] Full repository name (owner/name)
+    # @param path [String] Repository-relative path (e.g. ".github/workflows/ci.yml")
+    # @return [NamedTuple(sha: String, content: String)?] Blob sha and decoded content
+    # @raise [RuntimeError] On API error (non-404 4xx, 5xx)
+    def get_contents(repo : String, path : String) : {sha: String, content: String}?
+      ensure_token!
+      resp = HTTP::Client.get("#{BASE_URL}/repos/#{repo}/contents/#{path}", headers: @headers)
+      return nil if resp.status_code == 404
+      handle_errors(resp)
+      json = JSON.parse(resp.body)
+      sha = json["sha"].to_s
+      encoded = json["content"].to_s.gsub(/\s/, "")
+      {sha: sha, content: String.new(Base64.decode(encoded))}
+    end
+
+    # Creates or updates a repository file via the Contents API.
+    #
+    # Pass sha for updates, nil for creates. Content is base64-encoded
+    # before sending.
+    #
+    # @param repo [String] Full repository name (owner/name)
+    # @param path [String] Repository-relative path (e.g. ".github/workflows/ci.yml")
+    # @param content [String] Raw file content
+    # @param sha [String?] Blob sha of the existing file (nil to create)
+    # @param message [String] Commit message
+    # @return [String] Response body
+    # @raise [RuntimeError] On API error (4xx, 5xx)
+    def put_contents(repo : String, path : String, content : String, sha : String?, message : String) : String
+      payload = JSON.build do |json|
+        json.object do
+          json.field "message", message
+          json.field "content", Base64.strict_encode(content)
+          json.field "sha", sha if sha
+        end
+      end
+      put("/repos/#{repo}/contents/#{path}", payload)
+    end
+
     # Performs an authenticated GET request.
     #
     # @param path [String] API path (e.g., "/repos/owner/name/rulesets")

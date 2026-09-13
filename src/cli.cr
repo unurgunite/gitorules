@@ -92,6 +92,10 @@ module Gitorules
           options.quiet = true
         end
 
+        parser.on("--verbose", "Show unchanged workflows and detailed output") do
+          options.verbose = true
+        end
+
         parser.on("--yes", "Skip confirmation prompt and apply immediately") do
           options.yes = true
         end
@@ -224,7 +228,7 @@ module Gitorules
         if options.json?
           engine.diff_json(repos, io)
         else
-          engine.diff(repos, io: io)
+          engine.diff(repos, verbose: options.verbose?, io: io)
         end
         return 0
       end
@@ -235,7 +239,7 @@ module Gitorules
       end
 
       diff_io = IO::Memory.new
-      engine.diff(repos, io: diff_io)
+      engine.diff(repos, verbose: options.verbose?, io: diff_io)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 
@@ -248,12 +252,15 @@ module Gitorules
           end
         end
 
-        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, io: io)
+        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, verbose: options.verbose?, io: io)
         1
       else
         io.puts "no changes" unless options.quiet?
         0
       end
+    rescue ex : WorkflowError
+      STDERR.puts "Error: #{ex.message}"
+      2
     end
 
     private def self.cmd_diff(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
@@ -263,11 +270,14 @@ module Gitorules
       end
 
       diff_io = IO::Memory.new
-      engine.diff(repos, io: diff_io)
+      engine.diff(repos, verbose: options.verbose?, io: diff_io)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 
       diff_has_changes?(diff_text) ? 1 : 0
+    rescue ex : WorkflowError
+      STDERR.puts "Error: #{ex.message}"
+      2
     end
 
     private def self.diff_has_changes?(diff_text : String) : Bool

@@ -1,6 +1,7 @@
 require "./types"
 require "./github"
 require "./config"
+require "./workflows"
 require "./engine"
 require "./init"
 require "./cli"

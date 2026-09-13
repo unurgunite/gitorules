@@ -167,6 +167,19 @@ struct BranchRuleConfig
   end
 end
 
+# Configuration for a single workflow file sync entry.
+#
+# Maps a workflow target (e.g. "ci.yml") to a local template file.
+struct WorkflowConfig
+  include YAML::Serializable
+
+  def initialize
+  end
+
+  # Local template file path (e.g. "templates/ci.yml").
+  property source : String?
+end
+
 # Per-org configuration within a multi-org config.
 #
 # Each org can have its own repository list and rules.
@@ -180,6 +193,8 @@ struct OrgConfig
   property repos : Array(String)?
   # Map of branch type names to their rule configuration.
   property rules : Hash(String, BranchRuleConfig)?
+  # Map of workflow targets to their template sources.
+  property workflows : Hash(String, WorkflowConfig)?
 end
 
 # Top-level `.gitorules.yml` configuration.
@@ -195,6 +210,8 @@ struct Config
   property repos : Array(String)?
   # Map of branch type names to their rule configuration (single-org mode).
   property rules : Hash(String, BranchRuleConfig)?
+  # Map of workflow targets to template sources (single-org mode).
+  property workflows : Hash(String, WorkflowConfig)?
   # Multi-org configuration (overrides single-org fields).
   property orgs : Hash(String, OrgConfig)?
 
@@ -212,6 +229,25 @@ struct Config
     if org_name && (config_orgs = self.orgs)
       org_config = config_orgs[org_name]?
       return org_config.rules if org_config
+    end
+
+    nil
+  end
+
+  # Returns workflows for a specific repo, considering multi-org config.
+  #
+  # Mirrors `#rules_for`: single-org mode returns top-level workflows,
+  # multi-org mode looks up the owning org.
+  #
+  # @param repo [String] Full repository name (org/repo)
+  # @return [Hash(String, WorkflowConfig)?] Workflows for the repo's org
+  def workflows_for(repo : String) : Hash(String, WorkflowConfig)?
+    return self.workflows if self.workflows # single-org mode
+
+    org_name = repo.split("/").first?
+    if org_name && (config_orgs = self.orgs)
+      org_config = config_orgs[org_name]?
+      return org_config.workflows if org_config
     end
 
     nil
@@ -239,6 +275,8 @@ struct Options
   property? json : Bool = false
   # Suppress all output except errors.
   property? quiet : Bool = false
+  # Show unchanged workflows and detailed output.
+  property? verbose : Bool = false
   # Skip confirmation prompt (apply mode).
   property? yes : Bool = false
   # GitHub personal access token.
