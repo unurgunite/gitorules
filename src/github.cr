@@ -141,6 +141,12 @@ module Gitorules
       digest.update(data)
       hash = digest.final
 
+      signature = Base64.urlsafe_encode(rsa_sign(key, hash), padding: false)
+      "#{data}.#{signature}"
+    end
+
+    # Signs *hash* with the PEM private key, returning the raw signature.
+    private def rsa_sign(key : String, hash : Bytes) : Bytes
       bio = LibCrypto.bio_new_mem_buf(key.to_unsafe, key.bytesize)
       raise "JWT signing failed: BIO allocation error" if bio.null?
 
@@ -157,12 +163,9 @@ module Gitorules
       ret = LibCrypto.rsa_sign(LibCrypto::NID_SHA256, hash, hash.size, sig, pointerof(sig_len), rsa)
       LibCrypto.rsa_free(rsa)
 
-      unless ret == 1 && sig_len > 0
-        raise "JWT signing failed: RSA_sign returned #{ret}"
-      end
+      raise "JWT signing failed: RSA_sign returned #{ret}" unless ret == 1 && sig_len > 0
 
-      signature = Base64.urlsafe_encode(sig[0, sig_len], padding: false)
-      "#{data}.#{signature}"
+      sig[0, sig_len]
     end
 
     # Lists rulesets for a repository (summary, without full rules).
@@ -246,22 +249,20 @@ module Gitorules
       attempts = 0
       loop do
         ensure_token!
-        resp = case method
-               when :get
-                 HTTP::Client.get(url, headers: @headers)
-               when :post
-                 HTTP::Client.post(url, headers: @headers, body: body)
-               when :put
-                 HTTP::Client.put(url, headers: @headers, body: body)
-               else
-                 raise "Unsupported HTTP method #{method}"
-               end
-        if retryable_status?(resp.status_code) && attempts < MAX_RETRIES
-          sleep retry_delay(attempts, resp)
-          attempts += 1
-          next
-        end
-        return resp
+        resp = send_request(method, url, body)
+        return resp unless retryable_status?(resp.status_code) && attempts < MAX_RETRIES
+
+        sleep retry_delay(attempts, resp)
+        attempts += 1
+      end
+    end
+
+    private def send_request(method : Symbol, url : String, body : String?) : HTTP::Client::Response
+      case method
+      when :get  then HTTP::Client.get(url, headers: @headers)
+      when :post then HTTP::Client.post(url, headers: @headers, body: body)
+      when :put  then HTTP::Client.put(url, headers: @headers, body: body)
+      else            raise "Unsupported HTTP method #{method}"
       end
     end
 

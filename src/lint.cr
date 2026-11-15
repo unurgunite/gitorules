@@ -26,6 +26,7 @@ module Gitorules
     VALID_RULE_FIELDS     = %w[merge squash rebase name pattern checks linear_history delete_branch]
     VALID_TOP_LEVEL       = %w[org repos rules orgs defaults scopes labels labels_sync workflows files]
     VALID_WORKFLOW_FIELDS = %w[source extra_steps extra_steps_anchor]
+    MERGE_METHODS         = %w[merge squash rebase]
 
     # Lints a config file. Prints errors and warnings.
     #
@@ -40,15 +41,16 @@ module Gitorules
       err.puts "Error in #{path}: cannot read file (#{ex.message}). Fix: check the path and file permissions."
       2
     else
-      result = lint_content(content, path)
+      report_lint(lint_content(content, path), path, io, err)
+    end
+
+    # Prints the lint result and maps it to an exit code.
+    private def self.report_lint(result : LintResult, path : String, io : IO, err : IO) : Int32
       result.warnings.each { |w| err.puts "Warning: #{w}" }
-      if result.clean?
-        io.puts "OK: #{path} is valid"
-        0
-      else
-        result.errors.each { |e| err.puts "Error: #{e}" }
-        2
-      end
+      return 0.tap { io.puts "OK: #{path} is valid" } if result.clean?
+
+      result.errors.each { |e| err.puts "Error: #{e}" }
+      2
     end
 
     # Validates YAML content and returns errors and warnings.
@@ -65,9 +67,33 @@ module Gitorules
         return LintResult.new(errors, warnings)
       end
 
+      str_map = lint_top_level_keys(hash, path, errors)
+      lint_sections(str_map, content, path, errors, warnings)
+
+      LintResult.new(errors, warnings)
+    rescue ex : YAML::ParseException
+      errors = ["in #{path}: the file is not valid YAML (#{ex.message}). Fix: check indentation and quoting, then retry."]
+      LintResult.new(errors, [] of String)
+    end
+
+    # Runs each section check that is present, then the cross-section ones.
+    private def self.lint_sections(str_map : Hash(String, YAML::Any), content : String, path : String, errors : Array(String), warnings : Array(String)) : Nil
+      lint_rules_map(str_map["rules"], "rules", path, str_map["org"]?.try(&.as_s?), errors, warnings) if str_map["rules"]?
+      lint_orgs(str_map["orgs"], path, errors, warnings) if str_map["orgs"]?
+      lint_defaults(str_map["defaults"], path, errors, warnings) if str_map["defaults"]?
+      lint_scopes(str_map["scopes"], path, errors, warnings) if str_map["scopes"]?
+      lint_workflows_map(str_map["workflows"], "workflows", path, errors, warnings) if str_map["workflows"]?
+
+      lint_top_level_types(str_map, path, errors)
+      lint_has_any_rules(str_map, path, errors)
+      lint_consistency(content, path, errors, warnings)
+    end
+
+    # Rejects unknown top-level keys, then returns the mapping with string
+    # keys so every later check can index it safely.
+    private def self.lint_top_level_keys(hash : Hash(YAML::Any, YAML::Any), path : String, errors : Array(String)) : Hash(String, YAML::Any)
       keys = hash.keys.compact_map(&.as_s?)
-      unknown = keys - VALID_TOP_LEVEL
-      unknown.each do |key|
+      (keys - VALID_TOP_LEVEL).each do |key|
         errors << "in #{path} at #{key}: unknown top-level key `#{key}`. Fix: use one of #{VALID_TOP_LEVEL.join(", ")} or remove the key."
       end
 
@@ -77,35 +103,7 @@ module Gitorules
           str_map[name] = v
         end
       end
-
-      if rules = str_map["rules"]?
-        lint_rules_map(rules, "rules", path, str_map["org"]?.try(&.as_s?), errors, warnings)
-      end
-
-      if orgs = str_map["orgs"]?
-        lint_orgs(orgs, path, errors, warnings)
-      end
-
-      if defaults = str_map["defaults"]?
-        lint_defaults(defaults, path, errors, warnings)
-      end
-
-      if scopes = str_map["scopes"]?
-        lint_scopes(scopes, path, errors, warnings)
-      end
-
-      if workflows = str_map["workflows"]?
-        lint_workflows_map(workflows, "workflows", path, errors, warnings)
-      end
-
-      lint_top_level_types(str_map, path, errors)
-      lint_has_any_rules(str_map, path, errors)
-      lint_consistency(content, path, errors, warnings)
-
-      LintResult.new(errors, warnings)
-    rescue ex : YAML::ParseException
-      errors = ["in #{path}: the file is not valid YAML (#{ex.message}). Fix: check indentation and quoting, then retry."]
-      LintResult.new(errors, [] of String)
+      str_map
     end
 
     private def self.lint_top_level_types(str_map : Hash(String, YAML::Any), path : String, errors : Array(String)) : Nil
@@ -115,15 +113,20 @@ module Gitorules
         end
       end
       if repos = str_map["repos"]?
-        if list = repos.as_a?
-          list.each_with_index do |entry, i|
-            unless entry.as_s?
-              errors << "in #{path} at repos[#{i}]: every entry must be a string. Fix: quote the name, e.g. `\"myrepo\"`."
-            end
-          end
-        else
-          errors << "in #{path} at repos: the repository list must be an array. Fix: use a list such as `repos:\\n  - myrepo`."
-        end
+        lint_repo_list(repos, path, errors)
+      end
+    end
+
+    private def self.lint_repo_list(repos : YAML::Any, path : String, errors : Array(String)) : Nil
+      list = repos.as_a?
+      unless list
+        errors << "in #{path} at repos: the repository list must be an array. Fix: use a list such as `repos:\\n  - myrepo`."
+        return
+      end
+
+      list.each_with_index do |entry, i|
+        next if entry.as_s?
+        errors << "in #{path} at repos[#{i}]: every entry must be a string. Fix: quote the name, e.g. `\"myrepo\"`."
       end
     end
 
@@ -164,14 +167,18 @@ module Gitorules
           errors << "in #{path} at orgs.#{org_name}: expected a mapping with `repos` and `rules`. Fix: indent `repos:` and `rules:` under the org name."
           next
         end
-        org_map.each do |k, v|
-          name = k.as_s?
-          case name
-          when "rules"
-            lint_rules_map(v, "orgs.#{org_name}.rules", path, org_name, errors, warnings)
-          when "workflows"
-            lint_workflows_map(v, "orgs.#{org_name}.workflows", path, errors, warnings)
-          end
+        lint_org_fields(org_map, org_name, path, errors, warnings)
+      end
+    end
+
+    # The only fields an org block may carry.
+    private def self.lint_org_fields(org_map : Hash(YAML::Any, YAML::Any), org_name : String, path : String, errors : Array(String), warnings : Array(String)) : Nil
+      org_map.each do |k, v|
+        case k.as_s?
+        when "rules"
+          lint_rules_map(v, "orgs.#{org_name}.rules", path, org_name, errors, warnings)
+        when "workflows"
+          lint_workflows_map(v, "orgs.#{org_name}.workflows", path, errors, warnings)
         end
       end
     end
@@ -199,28 +206,36 @@ module Gitorules
         errors << "in #{path} at scopes: at least one scope is required. Fix: add a named scope with a `repos:` list."
       end
       scopes_map.each do |scope_key, scope_val|
-        scope_name = scope_key.as_s? || "?"
-        scope_map = scope_val.as_h?
-        unless scope_map
-          errors << "in #{path} at scopes.#{scope_name}: expected a mapping with `repos` and optional `rules`. Fix: indent `repos:` under the scope name."
-          next
-        end
-        scope_map.each do |k, v|
-          field = k.as_s?
-          case field
-          when "rules"
-            lint_rules_map(v, "scopes.#{scope_name}.rules", path, nil, errors, warnings)
-          when "repos"
-            unless v.as_a?
-              errors << "in #{path} at scopes.#{scope_name}.repos: expected a list of repositories. Fix: use `repos:\\n      - org/repo`."
-            end
-          when "exclude", "labels", "workflows", "files"
-            # Reserved fields, no validation needed.
-          else
-            if field
-              errors << "in #{path} at scopes.#{scope_name}.#{field}: unknown scope field `#{field}`. Fix: use `repos`, `exclude`, or `rules`, or remove the key."
-            end
+        lint_scope(scope_key.as_s? || "?", scope_val, path, errors, warnings)
+      end
+    end
+
+    # Validates one named scope entry.
+    private def self.lint_scope(scope_name : String, scope_val : YAML::Any, path : String, errors : Array(String), warnings : Array(String)) : Nil
+      scope_map = scope_val.as_h?
+      unless scope_map
+        errors << "in #{path} at scopes.#{scope_name}: expected a mapping with `repos` and optional `rules`. Fix: indent `repos:` under the scope name."
+        return
+      end
+      lint_scope_fields(scope_map, scope_name, path, errors, warnings)
+    end
+
+    # Validates one scope body. `exclude`, `labels`, `workflows` and
+    # `files` are reserved: they are parsed by their own resources.
+    private def self.lint_scope_fields(scope_map : Hash(YAML::Any, YAML::Any), scope_name : String, path : String, errors : Array(String), warnings : Array(String)) : Nil
+      scope_map.each do |k, v|
+        field = k.as_s?
+        case field
+        when "rules"
+          lint_rules_map(v, "scopes.#{scope_name}.rules", path, nil, errors, warnings)
+        when "repos"
+          unless v.as_a?
+            errors << "in #{path} at scopes.#{scope_name}.repos: expected a list of repositories. Fix: use `repos:\\n      - org/repo`."
           end
+        when nil, "exclude", "labels", "workflows", "files"
+          # Reserved fields, no validation needed.
+        else
+          errors << "in #{path} at scopes.#{scope_name}.#{field}: unknown scope field `#{field}`. Fix: use `repos`, `exclude`, or `rules`, or remove the key."
         end
       end
     end
@@ -256,6 +271,50 @@ module Gitorules
         return
       end
 
+      fields = lint_entry_fields(entry_map, location, path, errors)
+      source = lint_workflow_source(fields, key, location, path, errors)
+      return unless source
+
+      parsed_source = parse_lint_source(source, location, path, errors)
+      return unless parsed_source
+
+      base_content = lint_base_content(source, parsed_source, location, path, errors)
+      lint_workflow_steps(fields, base_content, source, location, path, errors, warnings)
+    end
+
+    # Anchor and extra-steps checks, which only make sense once the base
+    # template is known.
+    private def self.lint_workflow_steps(fields : Hash(String, YAML::Any), base_content : String?, source : String, location : String, path : String, errors : Array(String), warnings : Array(String)) : Nil
+      anchor = lint_workflow_anchor(fields, location, path, errors, warnings)
+      return unless lint_workflow_extra_present?(fields, location, path, errors, warnings)
+
+      extra = fields["extra_steps"]?.try(&.as_s?).try(&.strip) || ""
+      lint_workflow_extra(extra, base_content, source, anchor, location, path, errors)
+    end
+
+    # Required `source` value, reported when missing or blank.
+    private def self.lint_workflow_source(fields : Hash(String, YAML::Any), key : String, location : String, path : String, errors : Array(String)) : String?
+      source = fields["source"]?.try(&.as_s?).try(&.strip)
+      return source if source && !source.empty?
+
+      errors << "in #{path} at #{location}.source: a template source is required. Fix: set `source: templates/#{key}` or `source: owner/repo@v1:path/to/file.yml`."
+      nil
+    end
+
+    # Reads a local template, skipping remote sources (already pinned, so
+    # a missing local file is not an error there).
+    private def self.lint_base_content(source : String, parsed_source : TemplateSource, location : String, path : String, errors : Array(String)) : String?
+      return if parsed_source.kind.remote?
+
+      content = read_lint_file(source)
+      if content.nil?
+        errors << "in #{path} at #{location}.source: file not found '#{source}'. Fix: check the path relative to the current directory."
+      end
+      content
+    end
+
+    # String-keyed entry fields, with unknown field names reported.
+    private def self.lint_entry_fields(entry_map : Hash(YAML::Any, YAML::Any), location : String, path : String, errors : Array(String)) : Hash(String, YAML::Any)
       fields = {} of String => YAML::Any
       entry_map.each do |k, v|
         if name = k.as_s?
@@ -266,33 +325,15 @@ module Gitorules
       (fields.keys - VALID_WORKFLOW_FIELDS).each do |field|
         errors << "in #{path} at #{location}.#{field}: unknown field `#{field}`. Fix: use one of #{VALID_WORKFLOW_FIELDS.join(", ")} or remove the line."
       end
+      fields
+    end
 
-      source = fields["source"]?.try(&.as_s?).try(&.strip)
-      if source.nil? || source.empty?
-        errors << "in #{path} at #{location}.source: a template source is required. Fix: set `source: templates/#{key}` or `source: owner/repo@v1:path/to/file.yml`."
-        return
-      end
-
-      begin
-        parsed_source = TemplateSource.parse(source)
-      rescue ex : WorkflowError
-        errors << "in #{path} at #{location}.source: #{ex.message}. Fix: use a local path or `owner/repo@ref:path`."
-        return
-      end
-
-      base_content = nil
-      unless parsed_source.kind.remote?
-        base_content = read_lint_file(source)
-        if base_content.nil?
-          errors << "in #{path} at #{location}.source: file not found '#{source}'. Fix: check the path relative to the current directory."
-        end
-      end
-
-      anchor = lint_workflow_anchor(fields, location, path, errors, warnings)
-      return unless lint_workflow_extra_present?(fields, location, path, errors, warnings)
-
-      extra = fields["extra_steps"]?.try(&.as_s?).try(&.strip) || ""
-      lint_workflow_extra(extra, base_content, source, anchor, location, path, errors)
+    # Parses a `source:` value, reporting the accepted forms on failure.
+    private def self.parse_lint_source(source : String, location : String, path : String, errors : Array(String)) : TemplateSource?
+      TemplateSource.parse(source)
+    rescue ex : WorkflowError
+      errors << "in #{path} at #{location}.source: #{ex.message}. Fix: use a local path or `owner/repo@ref:path`."
+      nil
     end
 
     private def self.lint_workflow_target(key : String, location : String, path : String, errors : Array(String)) : Nil
@@ -340,12 +381,18 @@ module Gitorules
         errors << "in #{path} at #{location}.extra_steps: file '#{extra}' must contain a YAML list of steps. Fix: start the file with '- name: ...'."
         return
       end
-      if base = base_content
-        found = base.split("\n").any? { |line| WorkflowResource.anchor_line?(line, anchor) }
-        unless found
-          errors << "in #{path} at #{location}.extra_steps: unknown anchor '#{anchor}' (marker '# #{anchor}' not found in '#{source}'). Fix: add the marker to the base template or fix `extra_steps_anchor`."
-        end
-      end
+
+      lint_anchor_present(base_content, source, anchor, location, path, errors)
+    end
+
+    # The anchor marker must exist in the base template, otherwise the
+    # extra steps would silently never be inserted.
+    private def self.lint_anchor_present(base_content : String?, source : String, anchor : String, location : String, path : String, errors : Array(String)) : Nil
+      base = base_content
+      return unless base
+      return if base.split("\n").any? { |line| WorkflowResource.anchor_line?(line, anchor) }
+
+      errors << "in #{path} at #{location}.extra_steps: unknown anchor '#{anchor}' (marker '# #{anchor}' not found in '#{source}'). Fix: add the marker to the base template or fix `extra_steps_anchor`."
     end
 
     private def self.read_lint_file(path : String) : String?
@@ -388,17 +435,7 @@ module Gitorules
         return
       end
 
-      fields = {} of String => YAML::Any
-      rule_map.each do |k, v|
-        if name = k.as_s?
-          fields[name] = v
-        end
-      end
-
-      (fields.keys - VALID_RULE_FIELDS).each do |field|
-        errors << "in #{path} at #{location}.#{field}: unknown field `#{field}`. Fix: use one of #{VALID_RULE_FIELDS.join(", ")} or remove the line."
-      end
-
+      fields = lint_rule_fields(rule_map, location, path, errors)
       lint_merge_methods(fields, location, path, errors)
       lint_rule_strings(fields, location, path, errors)
 
@@ -409,24 +446,36 @@ module Gitorules
       lint_pending_fields(fields, location, path, warnings)
     end
 
-    private def self.lint_merge_methods(fields : Hash(String, YAML::Any), location : String, path : String, errors : Array(String)) : Nil
-      %w[merge squash rebase].each do |method|
-        next unless fields.has_key?(method)
-        value = fields[method]
-        if str = value.as_s?
-          unless str == "only"
-            errors << "in #{path} at #{location}.#{method}: found #{str.inspect}, but merge methods must be the string `\"only\"`. Fix: use `#{method}: only` to allow only #{method_label(method)}, or remove the line to allow all methods."
-          end
-        elsif !value.raw.nil?
-          found = value.raw.inspect
-          errors << "in #{path} at #{location}.#{method}: found #{found}, but merge methods must be the string `\"only\"`. Fix: use `#{method}: only` to allow only #{method_label(method)}, or remove the line to allow all methods."
+    # String-keyed rule fields, with unknown field names reported.
+    private def self.lint_rule_fields(rule_map : Hash(YAML::Any, YAML::Any), location : String, path : String, errors : Array(String)) : Hash(String, YAML::Any)
+      fields = {} of String => YAML::Any
+      rule_map.each do |k, v|
+        if name = k.as_s?
+          fields[name] = v
         end
       end
 
-      only = %w[merge squash rebase].select { |m| fields[m]?.try(&.as_s?) == "only" }
-      if only.size > 1
-        errors << "in #{path} at #{location}: conflicting merge methods (#{only.map { |m| "#{m}: only" }.join(" + ")}). Fix: keep only one merge method set to `only`, or remove all three to allow every method."
+      (fields.keys - VALID_RULE_FIELDS).each do |field|
+        errors << "in #{path} at #{location}.#{field}: unknown field `#{field}`. Fix: use one of #{VALID_RULE_FIELDS.join(", ")} or remove the line."
       end
+      fields
+    end
+
+    private def self.lint_merge_methods(fields : Hash(String, YAML::Any), location : String, path : String, errors : Array(String)) : Nil
+      MERGE_METHODS.each do |method|
+        next unless fields.has_key?(method)
+        value = fields[method]
+        found = value.as_s? || value.raw.inspect
+        next if found == "only"
+        next if value.as_s?.nil? && value.raw.nil?
+
+        errors << "in #{path} at #{location}.#{method}: found #{found.inspect}, but merge methods must be the string `\"only\"`. Fix: use `#{method}: only` to allow only #{method_label(method)}, or remove the line to allow all methods."
+      end
+
+      only = MERGE_METHODS.select { |m| fields[m]?.try(&.as_s?) == "only" }
+      return unless only.size > 1
+
+      errors << "in #{path} at #{location}: conflicting merge methods (#{only.map { |m| "#{m}: only" }.join(" + ")}). Fix: keep only one merge method set to `only`, or remove all three to allow every method."
     end
 
     private def self.lint_rule_strings(fields : Hash(String, YAML::Any), location : String, path : String, errors : Array(String)) : Nil
@@ -463,24 +512,37 @@ module Gitorules
         errors << "in #{path} at #{location}.checks: the list must not be empty. Fix: add at least one check name or remove the `checks:` line."
       end
       list.each_with_index do |entry, i|
-        text = entry.as_s?
-        unless text
-          errors << "in #{path} at #{location}.checks[#{i}]: every check name must be a string. Fix: quote the name, e.g. `\"CI / build\"`."
-          next
-        end
-        if text.strip.empty?
-          errors << "in #{path} at #{location}.checks[#{i}]: check names must not be blank. Fix: remove the entry or use a real check name."
-          next
-        end
-        if glob_check?(text)
-          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating branch rules. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
-          next
-        end
-        unless text.includes?("/")
-          hint = org ? " For this config, replace <org> with `#{org}` and <repo> with one of its repositories." : ""
-          warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): this does not look like a GitHub check name (expected \"Workflow / job\"). Fix: verify the name with #{CHECK_RUNS_CMD}.#{hint}"
-        end
+        lint_check_entry(entry, i, location, path, org, errors, warnings)
       end
+    end
+
+    # One check name: type and blankness are errors, a glob or a name
+    # without " / " is only a warning because both can still match.
+    private def self.lint_check_entry(entry : YAML::Any, i : Int32, location : String, path : String, org : String?, errors : Array(String), warnings : Array(String)) : Nil
+      text = entry.as_s?
+      text = lint_check_text(entry, text, i, location, path, errors)
+      return unless text
+
+      if glob_check?(text)
+        warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): glob patterns are matched locally and are skipped when creating branch rules. Fix: keep the pattern for matching, or replace it with exact names from #{CHECK_RUNS_CMD}."
+        return
+      end
+      return if text.includes?("/")
+
+      hint = org ? " For this config, replace <org> with `#{org}` and <repo> with one of its repositories." : ""
+      warnings << "in #{path} at #{location}.checks[#{i}] (#{text.inspect}): this does not look like a GitHub check name (expected \"Workflow / job\"). Fix: verify the name with #{CHECK_RUNS_CMD}.#{hint}"
+    end
+
+    # Rejects non-string and blank check names, returning the usable text.
+    private def self.lint_check_text(entry : YAML::Any, text : String?, i : Int32, location : String, path : String, errors : Array(String)) : String?
+      unless text
+        errors << "in #{path} at #{location}.checks[#{i}]: every check name must be a string. Fix: quote the name, e.g. `\"CI / build\"`."
+        return
+      end
+      return text unless text.strip.empty?
+
+      errors << "in #{path} at #{location}.checks[#{i}]: check names must not be blank. Fix: remove the entry or use a real check name."
+      nil
     end
 
     private def self.method_label(method : String) : String
@@ -515,23 +577,34 @@ module Gitorules
       err.puts "Error in #{path}: cannot read file (#{ex.message}). Fix: check the path and file permissions."
       2
     else
-      begin
-        migrated = migrate_content(content)
-      rescue ex : YAML::ParseException
-        err.puts "Error in #{path}: the file is not valid YAML (#{ex.message}). Fix: check indentation and quoting, then retry."
-        return 2
-      rescue ex : ArgumentError
-        err.puts "Error: #{ex.message}"
-        return 2
+      migrated = migrate_or_report(content, path, err)
+      return 2 unless migrated
+
+      write_migrated(path, migrated, in_place, io, err)
+    end
+
+    # Writes in place with a confirmation, or streams to STDOUT.
+    private def self.write_migrated(path : String, migrated : String, in_place : Bool, io : IO, err : IO) : Int32
+      unless in_place
+        io.puts migrated
+        return 0
       end
 
-      if in_place
-        File.write(path, migrated)
-        err.puts "Migrated #{path} to defaults/scopes shape."
-      else
-        io.puts migrated
-      end
+      File.write(path, migrated)
+      err.puts "Migrated #{path} to defaults/scopes shape."
       0
+    end
+
+    # Converts the content, printing the failure and returning nil so the
+    # caller maps it to exit code 2.
+    private def self.migrate_or_report(content : String, path : String, err : IO) : String?
+      migrate_content(content)
+    rescue ex : YAML::ParseException
+      err.puts "Error in #{path}: the file is not valid YAML (#{ex.message}). Fix: check indentation and quoting, then retry."
+      nil
+    rescue ex : ArgumentError
+      err.puts "Error: #{ex.message}"
+      nil
     end
 
     # Converts legacy YAML text to the new shape.
@@ -570,26 +643,38 @@ module Gitorules
       builder.puts "# Each organization became one scope; scope rules override defaults per field."
       builder.puts "scopes:"
       org_hash.each do |org_key, org_val|
-        org_name = org_key.as_s? || raise ArgumentError.new("nothing to migrate: every `orgs` key must be a string organization name.")
-        org_map = org_val.as_h? || raise ArgumentError.new("nothing to migrate: `orgs.#{org_name}` must be a mapping with `repos` and `rules`.")
-        org_fields = string_key_map(org_map)
-
-        repos = full_repo_names(org_fields["repos"]?, org_name)
-        rules_node = org_fields["rules"]?
-
-        builder.puts "  #{org_name}:"
-        builder.puts "    repos:"
-        if repos.empty?
-          builder.puts "      - #{org_name}/*"
-        else
-          repos.each { |r| builder.puts "      - #{r}" }
-        end
-        if rules_node && (rules_hash = rules_node.as_h?) && !rules_hash.empty?
-          builder.puts "    rules:"
-          append_rules(builder, rules_hash, "      ")
-        end
+        append_org_scope(builder, org_key, org_val)
       end
       builder.to_s
+    end
+
+    # Emits one org as a scope: repo list (globbed when absent) plus rules
+    # that differ from defaults.
+    private def self.append_org_scope(builder : IO, org_key : YAML::Any, org_val : YAML::Any) : Nil
+      org_name = org_key.as_s? || raise ArgumentError.new("nothing to migrate: every `orgs` key must be a string organization name.")
+      org_map = org_val.as_h? || raise ArgumentError.new("nothing to migrate: `orgs.#{org_name}` must be a mapping with `repos` and `rules`.")
+      org_fields = string_key_map(org_map)
+
+      repos = full_repo_names(org_fields["repos"]?, org_name)
+      rules_node = org_fields["rules"]?
+
+      builder.puts "  #{org_name}:"
+      append_repo_list(builder, repos.empty? ? ["#{org_name}/*"] : repos, "    ")
+      append_rules_section(builder, rules_node, "    ")
+    end
+
+    private def self.append_repo_list(builder : IO, repos : Array(String), indent : String) : Nil
+      builder.puts "#{indent}repos:"
+      repos.each { |r| builder.puts "#{indent}  - #{r}" }
+    end
+
+    # Writes `rules:` only when the node is a non-empty mapping.
+    private def self.append_rules_section(builder : IO, rules_node : YAML::Any?, indent : String) : Nil
+      rules_hash = rules_node.try(&.as_h?)
+      return if rules_hash.nil? || rules_hash.empty?
+
+      builder.puts "#{indent}rules:"
+      append_rules(builder, rules_hash, "#{indent}  ")
     end
 
     private def self.migrate_single_org(str_map : Hash(String, YAML::Any)) : String
@@ -601,27 +686,36 @@ module Gitorules
         raise ArgumentError.new("nothing to migrate: expected legacy `org`/`repos`/`rules` keys. Fix: add e.g. `org: myorg` with `repos:` and `rules:`.")
       end
 
-      repos = full_repo_names(repos_node, org)
-      if repos.empty? && org
-        repos = ["#{org}/*"]
-      end
-      if repos.empty?
-        raise ArgumentError.new("nothing to migrate: no repositories found. Fix: add `repos:` with at least one `org/name` entry, or `org:` for discovery.")
-      end
+      repos = single_org_repos(repos_node, org)
 
       builder = IO::Memory.new
       builder.puts "# Migrated to defaults/scopes shape."
       builder.puts "# Shared rules live in defaults; scopes.main selects the repositories."
-      if rules_node && (rules_hash = rules_node.as_h?) && !rules_hash.empty?
-        builder.puts "defaults:"
-        builder.puts "  rules:"
-        append_rules(builder, rules_hash, "    ")
-      end
+      append_defaults(builder, rules_node)
       builder.puts "scopes:"
       builder.puts "  main:"
-      builder.puts "    repos:"
-      repos.each { |r| builder.puts "      - #{r}" }
+      append_repo_list(builder, repos, "    ")
       builder.to_s
+    end
+
+    # Emits `defaults:` with the shared rules placed one level in.
+    private def self.append_defaults(builder : IO, rules_node : YAML::Any?) : Nil
+      rules_hash = rules_node.try(&.as_h?)
+      return if rules_hash.nil? || rules_hash.empty?
+
+      builder.puts "defaults:"
+      builder.puts "  rules:"
+      append_rules(builder, rules_hash, "    ")
+    end
+
+    # Repository list for a single-org config: explicit names win, `org`
+    # alone becomes an owner wildcard, and neither is an error.
+    private def self.single_org_repos(repos_node : YAML::Any?, org : String?) : Array(String)
+      repos = full_repo_names(repos_node, org)
+      repos = ["#{org}/*"] if repos.empty? && org
+      return repos unless repos.empty?
+
+      raise ArgumentError.new("nothing to migrate: no repositories found. Fix: add `repos:` with at least one `org/name` entry, or `org:` for discovery.")
     end
 
     private def self.string_key_map(node : Hash(YAML::Any, YAML::Any)) : Hash(String, YAML::Any)
@@ -632,35 +726,31 @@ module Gitorules
       result
     end
 
+    # Expands short repo names against *org*, keeping full names as-is and
+    # dropping duplicates and blanks.
     private def self.full_repo_names(node : YAML::Any?, org : String?) : Array(String)
       list = node.try(&.as_a?) || [] of YAML::Any
-      names = [] of String
+      names = Set(String).new
       list.each do |entry|
-        short = entry.as_s? || next
-        short = short.strip
-        next if short.empty?
-        if short.includes?("/")
-          names << short unless names.includes?(short)
-        elsif current_org = org
-          full = "#{current_org}/#{short}"
-          names << full unless names.includes?(full)
-        else
-          names << short unless names.includes?(short)
-        end
+        short = entry.as_s?.try(&.strip)
+        next if short.nil? || short.empty?
+
+        names << (short.includes?("/") ? short : (org ? "#{org}/#{short}" : short))
       end
-      names
+      names.to_a
     end
 
     private def self.append_rules(builder : IO, rules_hash : Hash(YAML::Any, YAML::Any), indent : String) : Nil
+      nested = indent + "  "
       rules_hash.each do |type_key, rule_val|
         type_name = type_key.as_s? || next
         builder.puts "#{indent}#{type_name}:"
         rule_map = rule_val.as_h?
         unless rule_map
-          builder.puts "#{indent}  merge: only"
+          builder.puts "#{nested}merge: only"
           next
         end
-        append_rule_fields(builder, rule_map, indent + "  ")
+        append_rule_fields(builder, rule_map, nested)
       end
     end
 
@@ -677,25 +767,23 @@ module Gitorules
     private def self.append_known_field(builder : IO, value : YAML::Any, field : String, indent : String) : Nil
       case field
       when "checks"
-        checks = value.as_a? || return
-        builder.puts "#{indent}checks:"
-        checks.each do |check|
-          text = check.as_s? || next
-          builder.puts "#{indent}  - #{text.inspect}"
-        end
-      when "merge", "squash", "rebase"
+        append_checks(builder, value, indent)
+      when "merge", "squash", "rebase", "pattern", "name"
         text = value.as_s? || return
-        if text == "only"
-          builder.puts "#{indent}#{field}: only"
-        else
-          builder.puts "#{indent}#{field}: #{text.inspect}"
-        end
-      when "pattern", "name"
-        text = value.as_s? || return
-        builder.puts "#{indent}#{field}: #{text.inspect}"
+        emitted = field == "pattern" || field == "name" || text != "only" ? text.inspect : "only"
+        builder.puts "#{indent}#{field}: #{emitted}"
       when "linear_history", "delete_branch"
         bool = value.as_bool?
         builder.puts "#{indent}#{field}: #{bool}" unless bool.nil?
+      end
+    end
+
+    private def self.append_checks(builder : IO, value : YAML::Any, indent : String) : Nil
+      checks = value.as_a? || return
+      builder.puts "#{indent}checks:"
+      checks.each do |check|
+        text = check.as_s? || next
+        builder.puts "#{indent}  - #{text.inspect}"
       end
     end
 

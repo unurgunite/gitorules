@@ -36,28 +36,31 @@ module Gitorules
       workers = pool_size.clamp(1, n)
       jobs = Channel({Int32, T}?).new(n + workers)
       results = Channel({Int32, U | Exception}).new(n)
-      handler = block
 
+      spawn_workers(workers, jobs, results, &block)
+      items.each_with_index { |item, idx| jobs.send({idx, item}) }
+      workers.times { jobs.send(nil) }
+      gather(results, n)
+    end
+
+    # Starts *workers* fibers draining *jobs* into *results*.
+    private def self.spawn_workers(workers : Int32, jobs : Channel({Int32, T}?), results : Channel({Int32, U | Exception}), &block : T, Int32 -> U) : Nil forall T, U
       workers.times do
         spawn do
-          loop do
-            job = jobs.receive
-            break if job.nil?
+          while job = jobs.receive
             idx, item = job
             begin
-              results.send({idx, handler.call(item, idx)})
+              results.send({idx, block.call(item, idx)})
             rescue ex
               results.send({idx, ex})
             end
           end
         end
       end
+    end
 
-      items.each_with_index do |item, idx|
-        jobs.send({idx, item})
-      end
-      workers.times { jobs.send(nil) }
-
+    # Collects *n* results in input order, reraising the first exception.
+    private def self.gather(results : Channel({Int32, U | Exception}), n : Int32) : Array(U) forall U
       ordered = Array(U | Exception?).new(n, nil)
       n.times do
         idx, value = results.receive

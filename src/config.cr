@@ -31,76 +31,46 @@ module Gitorules
     #
     # @raise [RuntimeError] If any rule has invalid values
     private def validate_config!
-      if rules = @config.rules
-        rules.each { |name, rule| rule.validate!(name) }
+      each_rule_group do |label, rules|
+        rules.each { |name, rule| rule.validate!("#{label}#{name}") }
       end
+    end
 
-      if defaults = @config.defaults
-        if default_rules = defaults.rules
-          default_rules.each { |name, rule| rule.validate!("defaults.#{name}") }
-        end
-      end
+    # Yields every rule map in the config with its error-message label
+    # prefix, so validation covers rules, defaults, scopes and orgs once.
+    private def each_rule_group(&)
+      group_pairs.each { |label, rules| yield label, rules }
+    end
 
+    # Every rule map with its message label prefix: rules, defaults,
+    # per-scope and per-org rules.
+    private def group_pairs : Array(Tuple(String, Hash(String, BranchRuleConfig)))
+      pairs = [] of Tuple(String, Hash(String, BranchRuleConfig))
+      @config.rules.try { |rules| pairs << {"", rules} }
+      @config.defaults.try(&.rules).try { |rules| pairs << {"defaults.", rules} }
       if scopes = @config.scopes
         scopes.each do |scope_name, scope_config|
-          if scope_rules = scope_config.rules
-            scope_rules.each { |name, rule| rule.validate!("#{scope_name}.#{name}") }
-          end
+          scope_config.rules.try { |rules| pairs << {"#{scope_name}.", rules} }
         end
       end
-
       if orgs = @config.orgs
         orgs.each do |org_name, org_config|
-          if org_rules = org_config.rules
-            org_rules.each { |name, rule| rule.validate!("#{org_name}.#{name}") }
-          end
+          org_config.rules.try { |rules| pairs << {"rules.#{org_name}.", rules} }
         end
       end
+      pairs
     end
 
     # Validates no conflicting merge methods across all rules.
     #
     # Exits with code 2 if any rule has >1 merge method set to "only".
     private def validate_merge_methods!
-      if rules = @config.rules
+      each_rule_group do |label, rules|
         rules.each do |name, rule|
-          unless rule.validate_merge_methods!
-            raise "rules.#{name}: conflicting merge methods detected"
-          end
-        end
-      end
+          next if rule.validate_merge_methods!
 
-      if defaults = @config.defaults
-        if default_rules = defaults.rules
-          default_rules.each do |name, rule|
-            unless rule.validate_merge_methods!
-              raise "defaults.#{name}: conflicting merge methods detected"
-            end
-          end
-        end
-      end
-
-      if scopes = @config.scopes
-        scopes.each do |scope_name, scope_config|
-          if scope_rules = scope_config.rules
-            scope_rules.each do |name, rule|
-              unless rule.validate_merge_methods!
-                raise "scopes.#{scope_name}.#{name}: conflicting merge methods detected"
-              end
-            end
-          end
-        end
-      end
-
-      if orgs = @config.orgs
-        orgs.each do |org_name, org_config|
-          if org_rules = org_config.rules
-            org_rules.each do |name, rule|
-              unless rule.validate_merge_methods!
-                raise "rules.#{org_name}.#{name}: conflicting merge methods detected"
-              end
-            end
-          end
+          subject = label == "" ? "rules" : label.chomp(".")
+          raise "#{subject}.#{name}: conflicting merge methods detected"
         end
       end
     end
@@ -116,26 +86,26 @@ module Gitorules
     # @raise [RuntimeError] If no repos or org configured
     def repo_names : Array(String)
       if orgs = @config.orgs
-        names = [] of String
-        orgs.each do |org_name, org_config|
-          if repos = org_config.repos
-            repos.each { |r| names << "#{org_name}/#{r}" }
-          else
-            names.concat(discover_repos(org_name))
-          end
+        multi_org_repo_names(orgs)
+      elsif repos = @config.repos
+        repos
+      elsif org = @config.org
+        discover_repos(org)
+      else
+        raise "No repos or org in config"
+      end
+    end
+
+    private def multi_org_repo_names(orgs : Hash(String, OrgConfig)) : Array(String)
+      names = [] of String
+      orgs.each do |org_name, org_config|
+        if repos = org_config.repos
+          repos.each { |r| names << "#{org_name}/#{r}" }
+        else
+          names.concat(discover_repos(org_name))
         end
-        return names
       end
-
-      if repos = @config.repos
-        return repos
-      end
-
-      if org = @config.org
-        return discover_repos(org)
-      end
-
-      raise "No repos or org in config"
+      names
     end
 
     # Returns true when the config uses named scopes.

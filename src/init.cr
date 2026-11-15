@@ -63,27 +63,60 @@ module Gitorules
       files = self.class.template_files(template)
       raise "Unknown template '#{template}'. Valid templates: #{self.class.template_names.join(", ")}." unless files
 
-      files.each_key do |target|
-        unless FileSync.allowed?(target)
-          raise FileSyncError.new("Invalid file target '#{target}': only allowlisted paths may be synced")
-        end
+      files.each_key { |target| validate_target!(target) }
+      files.each do |target, content|
+        scaffold_file(repo, target, content, template, io, dry_run)
+      end
+    end
+
+    private def validate_target!(target : String) : Nil
+      return if FileSync.allowed?(target)
+
+      raise FileSyncError.new("Invalid file target '#{target}': only allowlisted paths may be synced")
+    end
+
+    # Writes one template file unless the remote copy already matches.
+    private def scaffold_file(repo : String, target : String, content : String, template : String, io : IO, dry_run : Bool) : Nil
+      local_sha = WorkflowResource.blob_sha(content)
+      remote = @client.get_contents(repo, target)
+      if remote && remote[:sha] == local_sha
+        io.puts "#{repo}: File '#{target}' up to date"
+        return
       end
 
-      files.each do |target, content|
-        local_sha = WorkflowResource.blob_sha(content)
-        remote = @client.get_contents(repo, target)
-        if remote && remote[:sha] == local_sha
-          io.puts "#{repo}: File '#{target}' up to date"
-          next
-        end
-        action = remote ? "update" : "create"
-        if dry_run
-          io.puts "#{repo}: Would #{action} file '#{target}'"
-          next
-        end
-        @client.put_contents(repo, target, content, remote.try(&.[:sha]), "Scaffold #{target} via gitorules init --template #{template}")
-        io.puts "#{repo}: #{action == "create" ? "Created" : "Updated"} file '#{target}'"
+      action = remote ? "update" : "create"
+      if dry_run
+        io.puts "#{repo}: Would #{action} file '#{target}'"
+        return
       end
+
+      @client.put_contents(repo, target, content, remote.try(&.[:sha]), "Scaffold #{target} via gitorules init --template #{template}")
+      io.puts "#{repo}: #{action == "create" ? "Created" : "Updated"} file '#{target}'"
+    end
+
+    # Repo names with the owning org stripped, for the config's `repos` list.
+    private def short_repo_names(repos : Array(String), org : String?) : Array(String)
+      names = org ? repos.map(&.lchop("#{org}/")) : repos.dup
+      names.uniq!
+    end
+
+    # Fetches the full ruleset, or nil when it has no id or the request
+    # failed (the failure is reported and counted by the caller).
+    private def fetch_full_ruleset(repo : String, rs : Ruleset, err : IO) : Ruleset?
+      id = rs.id
+      return unless id
+
+      @client.get_ruleset(repo, id)
+    rescue ex
+      err.puts "Warning: could not fetch ruleset '#{rs.name}' in #{repo}: #{format_http_error(ex)}"
+      nil
+    end
+
+    # Merges one ruleset's config into the accumulated per-type map.
+    private def add_rules(all_rules : Hash(String, BranchRuleConfig), full : Ruleset) : Nil
+      type = classify_ruleset(full)
+      cfg = extract_config(full)
+      all_rules[type] = (existing = all_rules[type]?) ? merge_configs(existing, cfg) : cfg
     end
 
     # Generates `.gitorules.yml` from existing rulesets.
@@ -96,55 +129,56 @@ module Gitorules
     # @param err [IO] Error stream (default: STDERR)
     def generate(repos : Array(String), io : IO = STDOUT, err : IO = STDERR)
       config = Config.new
-      org = extract_org(repos)
-      config.org = org if org
-
-      if org
-        prefix = "#{org}/"
-        config.repos = repos.map(&.lchop(prefix)).uniq!
-      else
-        config.repos = repos.uniq
-      end
+      config.org = org = extract_org(repos)
+      config.repos = short_repo_names(repos, org)
 
       all_rules = {} of String => BranchRuleConfig
-      skipped = 0
-
-      repos.each do |repo|
-        rulesets = begin
-          @client.list_rulesets(repo)
-        rescue ex
-          err.puts "Warning: #{repo}: #{format_http_error(ex)}"
-          skipped += 1
-          next
-        end
-
-        rulesets.each do |rs|
-          id = rs.id || next
-
-          full = begin
-            @client.get_ruleset(repo, id)
-          rescue ex
-            err.puts "Warning: could not fetch ruleset '#{rs.name}' in #{repo}: #{format_http_error(ex)}"
-            skipped += 1
-            next
-          end
-
-          type = classify_ruleset(full)
-          cfg = extract_config(full)
-
-          if existing = all_rules[type]?
-            all_rules[type] = merge_configs(existing, cfg)
-          else
-            all_rules[type] = cfg
-          end
-        end
-      end
+      skipped = collect_rules(repos, all_rules, err)
 
       if skipped > 0
         err.puts "Warning: #{skipped} branch rule(s) were skipped due to errors"
       end
 
       config.rules = all_rules unless all_rules.empty?
+      print_config(config, skipped, org, io)
+    end
+
+    # Fills *all_rules* from every repo's rulesets; returns how many
+    # ruleset fetches failed.
+    private def collect_rules(repos : Array(String), all_rules : Hash(String, BranchRuleConfig), err : IO) : Int32
+      skipped = 0
+      repos.each do |repo|
+        rulesets = list_rulesets(repo, err)
+        if rulesets
+          skipped += collect_repo_rulesets(repo, rulesets, all_rules, err)
+        else
+          skipped += 1
+        end
+      end
+      skipped
+    end
+
+    private def list_rulesets(repo : String, err : IO) : Array(Ruleset)?
+      @client.list_rulesets(repo)
+    rescue ex
+      err.puts "Warning: #{repo}: #{format_http_error(ex)}"
+      nil
+    end
+
+    private def collect_repo_rulesets(repo : String, rulesets : Array(Ruleset), all_rules : Hash(String, BranchRuleConfig), err : IO) : Int32
+      skipped = 0
+      rulesets.each do |rs|
+        full = fetch_full_ruleset(repo, rs, err)
+        if full
+          add_rules(all_rules, full)
+        else
+          skipped += 1
+        end
+      end
+      skipped
+    end
+
+    private def print_config(config : Config, skipped : Int32, org : String?, io : IO) : Nil
       io.puts "# gitorules configuration"
       io.puts "# Generated by `gitorules init`"
       if skipped > 0
@@ -222,6 +256,24 @@ module Gitorules
 
     # Extracts branch configuration from a ruleset's rules.
     #
+    private def apply_merge_method(cfg : BranchRuleConfig, methods : Array(JSON::Any)?) : BranchRuleConfig
+      first = methods.try(&.first?)
+      return cfg unless first
+
+      case first.to_s
+      when "merge"  then cfg.merge = "only"
+      when "squash" then cfg.squash = "only"
+      when "rebase" then cfg.rebase = "only"
+      end
+      cfg
+    end
+
+    private def apply_checks(cfg : BranchRuleConfig, checks : Array(JSON::Any)?) : BranchRuleConfig
+      contexts = checks.try(&.compact_map { |c| c.as_h["context"]?.try(&.to_s) })
+      cfg.checks = contexts unless contexts.nil? || contexts.empty?
+      cfg
+    end
+
     # Reads pull_request rule for merge method and
     # required_status_checks rule for check contexts.
     #
@@ -234,22 +286,12 @@ module Gitorules
       ruleset.rules.each do |rule|
         next unless params = rule.parameters
 
+        # BranchRuleConfig is a struct: helpers return it instead of mutating.
         case rule.type
         when "pull_request"
-          methods = params["allowed_merge_methods"]?.try(&.as_a)
-          if methods && methods.size > 0
-            case methods[0].to_s
-            when "merge"  then cfg.merge = "only"
-            when "squash" then cfg.squash = "only"
-            when "rebase" then cfg.rebase = "only"
-            end
-          end
+          cfg = apply_merge_method(cfg, params["allowed_merge_methods"]?.try(&.as_a))
         when "required_status_checks"
-          checks = params["required_status_checks"]?.try(&.as_a)
-          if checks && checks.size > 0
-            contexts = checks.compact_map { |c| c.as_h["context"]?.try(&.to_s) }
-            cfg.checks = contexts unless contexts.empty?
-          end
+          cfg = apply_checks(cfg, params["required_status_checks"]?.try(&.as_a))
         end
       end
 

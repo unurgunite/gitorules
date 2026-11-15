@@ -4,7 +4,7 @@ version: 0.3.1
 authors:
   - unurgunite
 
-crystal: ">= 1.21.0"
+crystal: ">= 1.22.0"
 
 license: MIT
 
@@ -14,9 +14,15 @@ targets:
   gitorules:
     main: src/gitorules.cr
   ameba:
-    main: lib/ameba/bin/ameba.cr
+    main: bin/ameba.cr
 
 development_dependencies:
+  ameba-method_length:
+    github: unurgunite/ameba-method_length
+    version: "~> 0.1.1"
+  catalyst:
+    github: unurgunite/catalyst
+    version: "~> 0.9.3"
   webmock:
     github: manastech/webmock.cr
     branch: master

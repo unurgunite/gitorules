@@ -13,7 +13,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            crystal: "1.21.0"
+            crystal: "1.22.3"
           - os: macos-latest
             crystal: latest
           - os: macos-15-intel
@@ -44,7 +44,7 @@ jobs:
         run: shards install
 
       - name: Check formatting
-        if: runner.os != 'Windows' && matrix.crystal == '1.21.0'
+        if: runner.os != 'Windows' && matrix.crystal == '1.22.3'
         run: crystal tool format --check
 
       - name: Lint
@@ -54,7 +54,7 @@ jobs:
           bin/ameba
 
       - name: Lint example config
-        if: runner.os != 'Windows' && matrix.crystal == '1.21.0'
+        if: runner.os != 'Windows' && matrix.crystal == '1.22.3'
         run: |
           crystal build src/gitorules.cr -o gitorules
           ./gitorules lint --config .gitorules.yml.example
