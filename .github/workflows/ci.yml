@@ -4,22 +4,20 @@ on: [push, pull_request]
 
 jobs:
   check-source:
-    if: github.base_ref == 'master'
+    # Only PRs into master are restricted to v*/system/* source branches.
+    # Keeping this job out of release-branch runs also stops it from
+    # reporting "skipping" and leaving the PR status stuck on UNSTABLE.
+    if: github.base_ref == 'master' && (github.event_name == 'pull_request' || github.event_name == 'push')
     uses: FlorexLabs/shared-workflows/.github/workflows/check-source-branch.yml@master
 
   test:
     strategy:
       fail-fast: false
+      # One Crystal version everywhere, so a compiler change never lands
+      # on a single OS leg unnoticed.
       matrix:
-        include:
-          - os: ubuntu-latest
-            crystal: "1.21.0"
-          - os: macos-latest
-            crystal: latest
-          - os: macos-15-intel
-            crystal: latest
-          - os: windows-latest
-            crystal: latest
+        crystal: ["1.22.3"]
+        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
 
     runs-on: ${{ matrix.os }}
 
@@ -44,7 +42,7 @@ jobs:
         run: shards install
 
       - name: Check formatting
-        if: runner.os != 'Windows' && matrix.crystal == '1.21.0'
+        if: runner.os != 'Windows'
         run: crystal tool format --check
 
       - name: Lint
@@ -54,7 +52,7 @@ jobs:
           bin/ameba
 
       - name: Lint example config
-        if: runner.os != 'Windows' && matrix.crystal == '1.21.0'
+        if: runner.os != 'Windows'
         run: |
           crystal build src/gitorules.cr -o gitorules
           ./gitorules lint --config .gitorules.yml.example

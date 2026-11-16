@@ -4,6 +4,14 @@ shards:
     git: https://github.com/crystal-ameba/ameba.git
     version: 1.7.0
 
+  ameba-method_length:
+    git: https://github.com/unurgunite/ameba-method_length.git
+    version: 0.1.1
+
+  catalyst:
+    git: https://github.com/unurgunite/catalyst.git
+    version: 0.9.3
+
   webmock:
     git: https://github.com/manastech/webmock.cr.git
     version: 0.14.0+git.commit.fde6b20d5b80401a967e044b1a3e80ee391bed60

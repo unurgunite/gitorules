@@ -89,29 +89,33 @@ module Gitorules
       entries = [] of LabelChange
       by_actual = {} of String => Label
       actual.each { |l| by_actual[l.name] = l }
-      want_names = wants.map(&.name)
 
-      wants.each do |w|
-        if have = by_actual[w.name]?
-          changes = label_changes(w, have)
-          entries << LabelChange.new(action: changes.empty? ? "unchanged" : "update", name: w.name, changes: changes)
-        else
-          entries << LabelChange.new(action: "create", name: w.name, changes: ["color: #{w.norm_color}", "description: #{w.norm_description.inspect}"])
-        end
-      end
-
+      wants.each { |w| entries << wanted_entry(w, by_actual[w.name]?) }
       return entries if mode == LabelsSync::IGNORE
 
+      want_names = Set(String).new(wants.map(&.name))
       actual.each do |a|
         next if want_names.includes?(a.name)
-        if mode == LabelsSync::PRUNE
-          entries << LabelChange.new(action: "orphan", name: a.name, changes: ["delete on prune"])
-        else
-          entries << LabelChange.new(action: "orphan", name: a.name, changes: ["orphan (warn only, kept)"])
-        end
+
+        entries << orphan_entry(a.name, mode)
       end
 
       entries
+    end
+
+    private def wanted_entry(want : Label, have : Label?) : LabelChange
+      unless have
+        changes = ["color: #{want.norm_color}", "description: #{want.norm_description.inspect}"]
+        return LabelChange.new(action: "create", name: want.name, changes: changes)
+      end
+
+      changes = label_changes(want, have)
+      LabelChange.new(action: changes.empty? ? "unchanged" : "update", name: want.name, changes: changes)
+    end
+
+    private def orphan_entry(name : String, mode : String) : LabelChange
+      changes = [mode == LabelsSync::PRUNE ? "delete on prune" : "orphan (warn only, kept)"]
+      LabelChange.new(action: "orphan", name: name, changes: changes)
     end
 
     # Applies label changes. Dry-run performs zero writes.
@@ -209,22 +213,22 @@ module Gitorules
       entries = diff_entries(repo)
       return if quiet
       io.puts "#{prefix}=== #{repo} labels (#{sync_mode}) ==="
-      entries.each do |e|
-        case e.action
-        when "create"
-          io.puts "  #{green("+ Create label '#{e.name}'", io)}"
-        when "update"
-          io.puts "  #{yellow("~ Update label '#{e.name}': #{e.changes.join(", ")}", io)}"
-        when "orphan"
-          if sync_mode == LabelsSync::PRUNE
-            io.puts "  #{red("- Delete label '#{e.name}' (prune)", io)}"
-          else
-            io.puts "  #{red("- Orphan label '#{e.name}' (warn only, kept)", io)}"
-          end
-        else
-          io.puts "  #{dim("  Label '#{e.name}': no changes", io)}"
-        end
+      entries.each { |e| io.puts diff_line(e, io) }
+    end
+
+    private def diff_line(e : LabelChange, io : IO) : String
+      case e.action
+      when "create" then green("+ Create label '#{e.name}'", io)
+      when "update" then yellow("~ Update label '#{e.name}': #{e.changes.join(", ")}", io)
+      when "orphan" then red(orphan_line(e.name, io), io)
+      else               dim("  Label '#{e.name}': no changes", io)
       end
+    end
+
+    private def orphan_line(name : String, io : IO) : String
+      return "- Delete label '#{name}' (prune)" if sync_mode == LabelsSync::PRUNE
+
+      "- Orphan label '#{name}' (warn only, kept)"
     end
 
     # Computes entries for apply JSON output without performing writes.

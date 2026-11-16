@@ -130,6 +130,15 @@ module Gitorules
         CLI.run(["--token", "test", "--config", config_path, "apply", "--repo", repo, "--dry-run", "--yes"]).should eq(1)
       end
 
+      it "returns 1 for apply --dry-run without prompting" do
+        WebMock.stub(:get, "https://api.github.com/repos/unurgunite/test-repo/rulesets")
+          .to_return(body: "[]")
+
+        # Empty input: a prompt would read EOF and decline, so a 1 here
+        # proves the dry run never asked.
+        CLI.run(["--token", "test", "--config", config_path, "apply", "--repo", repo, "--dry-run"], input_io: IO::Memory.new).should eq(1)
+      end
+
       it "warns about --dry-run ignored with status" do
         WebMock.stub(:get, "https://api.github.com/repos/unurgunite/test-repo/rulesets")
           .to_return(body: "[]")

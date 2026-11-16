@@ -99,18 +99,22 @@ struct BranchRuleConfig
       end
     {% end %}
 
+    collect_pending_warnings(warnings, type_name)
+    warnings.each { |w| STDERR.puts "Warning: #{w}" }
+
+    unless errors.empty?
+      raise errors.join("\n")
+    end
+  end
+
+  # Warns about configured-but-unenforced fields.
+  private def collect_pending_warnings(warnings : Array(String), type_name : String) : Nil
     if linear_history == true
       warnings << "rules.#{type_name}.linear_history: field not yet implemented — ignoring"
     end
 
     if delete_branch == true
       warnings << "rules.#{type_name}.delete_branch: field not yet implemented — ignoring"
-    end
-
-    warnings.each { |w| STDERR.puts "Warning: #{w}" }
-
-    unless errors.empty?
-      raise errors.join("\n")
     end
   end
 
@@ -383,7 +387,11 @@ struct Config
 end
 
 # CLI options passed via command-line flags.
-struct Options
+#
+# A class, not a struct: flags are filled in from `OptionParser` blocks,
+# and a block parameter of a struct type is a copy, so every assignment
+# inside the block would land on the copy and be lost.
+class Options
   # Operation mode: "status", "apply", "diff", "init".
   # Empty string means no command was given — show help.
   property mode : String = ""
@@ -419,8 +427,10 @@ struct Options
   property only : String? = nil
   # Repositories to exclude (owner/name, exact or glob).
   property exclude : Array(String) = [] of String
-  # Show detailed output.
-  property? verbose : Bool = false
+  # Config file path gathered during parsing (default: .gitorules.yml).
+  property config_path : String = ".gitorules.yml"
+  # Overwrite the config in place (migrate only).
+  property? in_place : Bool = false
 
   def initialize
   end

@@ -42,166 +42,146 @@ module Gitorules
     # @return [Int32] Exit code
     # @raise [ExitSignal] On --version, --help, or any error condition
     private def self.execute(args : Array(String), input_io : IO = STDIN)
-      options = Options.new
-      config_path = ".gitorules.yml"
-      in_place = false
-      help_text = ""
-
       normalized = normalize_scope_verify(args)
 
-      OptionParser.parse(normalized) do |parser|
-        help_text = parser.to_s
-        parser.banner = "Usage: gitorules <status|apply|diff|init|lint|migrate|verify> [options]\n\nCommands:\n"
-
-        parser.on("status", "Show branch status for repositories") do
-          options.mode = "status"
-        end
-
-        parser.on("apply", "Apply branch configuration from .gitorules.yml") do
-          options.mode = "apply"
-        end
-
-        parser.on("diff", "Show pending changes without applying") do
-          options.mode = "diff"
-        end
-
-        parser.on("init", "Generate .gitorules.yml from existing branch rules") do
-          options.mode = "init"
-        end
-
-        parser.on("lint", "Validate config file schema and values") do
-          options.mode = "lint"
-        end
-
-        parser.on("migrate", "Convert legacy config to defaults/scopes shape") do
-          options.mode = "migrate"
-        end
-
-        parser.on("verify", "Verify required checks are produced by workflows") do
-          options.mode = "verify"
-        end
-
-        parser.separator "\nOptions:\n"
-
-        parser.on("--dry-run", "Preview apply changes without making them") do
-          options.dry_run = true
-        end
-
-        parser.on("--diff", "Show pending changes (same as diff command)") do
-          options.diff = true
-        end
-
-        parser.on("--repo REPO", "Target a single repository (owner/name)") do |v|
-          options.repo = v
-        end
-
-        parser.on("--scope NAME", "Only process repositories in this scope") do |v|
-          options.scope = v
-        end
-
-        parser.on("--only LIST", "Only process subsystems: branch,labels,workflows,files (comma-separated)") do |v|
-          options.only = v
-        end
-
-        parser.on("--exclude REPO", "Exclude repository (owner/name, repeatable)") do |v|
-          v.split(",").each do |part|
-            repo = part.strip
-            options.exclude << repo unless repo.empty?
-          end
-        end
-
-        parser.on("--verbose", "Show detailed output") do
-          options.verbose = true
-        end
-        parser.on("--org ORG", "GitHub organization name (for init)") do |v|
-          options.org = v
-        end
-
-        parser.on("--template NAME", "Standard CI template for init (ruby, node, crystal, gradle)") do |v|
-          options.template = v
-        end
-
-        parser.on("--json", "Machine-readable JSON output") do
-          options.json = true
-        end
-
-        parser.on("--quiet", "Suppress all output except errors") do
-          options.quiet = true
-        end
-
-        parser.on("--verbose", "Show unchanged workflows and detailed output") do
-          options.verbose = true
-        end
-
-        parser.on("--yes", "Skip confirmation prompt and apply immediately") do
-          options.yes = true
-        end
-
-        parser.on("--token TOKEN", "GitHub personal access token") do |v|
-          options.token = v
-        end
-
-        parser.on("--app-id ID", "GitHub App ID (for GitHub App auth)") do |v|
-          options.app_id = v
-        end
-
-        parser.on("--private-key PEM", "GitHub App private key (PEM content)") do |v|
-          options.private_key = v
-        end
-
-        parser.on("--private-key-path PATH", "Path to GitHub App private key PEM file") do |v|
-          options.private_key = File.read(v)
-        rescue ex
-          STDERR.puts "Error reading private key: #{ex.message}"
-          raise ExitSignal.new(2)
-        end
-
-        parser.on("--installation-id ID", "GitHub App installation ID") do |v|
-          options.installation_id = v
-        end
-
-        parser.on("--config PATH", "Path to config file (default: .gitorules.yml)") do |v|
-          config_path = v
-        end
-
-        parser.on("--in-place", "Overwrite config file in place (migrate only)") do
-          in_place = true
-        end
-
-        parser.on("--version", "Show version") do
-          puts "gitorules v#{VERSION}"
-          raise ExitSignal.new(0)
-        end
-
-        parser.on("-h", "--help", "Show help") do
-          puts parser
-          raise ExitSignal.new(0)
-        end
-      end
+      options, parser = build_options(normalized)
 
       if options.mode.empty?
-        puts help_text
+        puts parser
         return 0
       end
 
-      # Offline commands need no auth token.
-      if options.mode == "lint"
-        return Linter.lint_file(config_path)
+      if code = offline_command(options)
+        return code
       end
 
-      if options.mode == "migrate"
-        return Migrator.migrate_file(config_path, in_place)
-      end
+      run_with_options(options, options.config_path, input_io)
+    end
 
-      if options.mode == "verify"
-        return Verifier.verify_file(config_path, options.scope, options.json?)
+    # Runs commands that need no token, so `lint`, `migrate` and `verify`
+    # work without auth. Returns nil for network-backed commands.
+    private def self.offline_command(options : Options) : Int32?
+      case options.mode
+      when "lint"
+        Linter.lint_file(options.config_path)
+      when "migrate"
+        Migrator.migrate_file(options.config_path, options.in_place?, dry_run: options.dry_run?)
+      when "verify"
+        Verifier.verify_file(options.config_path, options.scope, options.json?)
+      else
+        if options.in_place?
+          STDERR.puts "Warning: --in-place has no effect on '#{options.mode}' command"
+        end
+        nil
       end
+    end
 
-      if in_place
-        STDERR.puts "Warning: --in-place has no effect on '#{options.mode}' command"
+    # Declares every command and flag, then lets the *block* snapshot the
+    # parser (help text) before parsing. Flag descriptions stay here; the
+    # values land in the returned `Options`.
+    #
+    # @return [Options] Parsed options
+    # @raise [ExitSignal] On --version, --help, or an invalid value
+    private def self.build_options(args : Array(String)) : {Options, OptionParser}
+      options = Options.new
+      parser = OptionParser.new
+      parser.banner = "Usage: gitorules <status|apply|diff|init|lint|migrate|verify> [options]\n\nCommands:\n"
+
+      define_commands(parser, options)
+      parser.separator "\nOptions:\n"
+      define_selection_flags(parser, options)
+      define_output_flags(parser, options)
+      define_auth_flags(parser, options)
+      define_meta_flags(parser, options)
+
+      parser.parse(args)
+      {options, parser}
+    end
+
+    # Subcommands. Each only records `options.mode`; dispatch happens later.
+    private def self.define_commands(parser : OptionParser, options : Options) : Nil
+      {
+        "status"  => {"Show branch status for repositories", "status"},
+        "apply"   => {"Apply branch configuration from .gitorules.yml", "apply"},
+        "diff"    => {"Show pending changes without applying", "diff"},
+        "init"    => {"Generate .gitorules.yml from existing branch rules", "init"},
+        "lint"    => {"Validate config file schema and values", "lint"},
+        "migrate" => {"Convert legacy config to defaults/scopes shape", "migrate"},
+        "verify"  => {"Verify required checks are produced by workflows", "verify"},
+      }.each do |name, (description, mode)|
+        parser.on(name, description) { options.mode = mode }
       end
+    end
 
-      run_with_options(options, config_path, input_io)
+    # What to process: repository, scope, subsystem and exclusion filters.
+    private def self.define_selection_flags(parser : OptionParser, options : Options) : Nil
+      parser.on("--dry-run", "Preview every write without performing it") do
+        options.dry_run = true
+      end
+      parser.on("--diff", "Show pending changes (same as diff command)") do
+        options.diff = true
+      end
+      define_target_flags(parser, options)
+    end
+
+    # Which repositories and subsystems a run touches.
+    private def self.define_target_flags(parser : OptionParser, options : Options) : Nil
+      parser.on("--repo REPO", "Target a single repository (owner/name)") { |v| options.repo = v }
+      parser.on("--scope NAME", "Only process repositories in this scope") { |v| options.scope = v }
+      parser.on("--only LIST", "Only process subsystems: branch,labels,workflows,files (comma-separated)") do |v|
+        options.only = v
+      end
+      parser.on("--exclude REPO", "Exclude repository (owner/name, repeatable)") do |v|
+        options.exclude.concat(parse_exclude(v))
+      end
+      parser.on("--org ORG", "GitHub organization name (for init)") { |v| options.org = v }
+      parser.on("--template NAME", "Standard CI template for init (ruby, node, crystal, gradle)") do |v|
+        options.template = v
+      end
+    end
+
+    # Splits a comma-separated --exclude value, dropping blanks so a
+    # trailing comma does not add an empty pattern that matches nothing.
+    private def self.parse_exclude(raw : String) : Array(String)
+      raw.split(",").map(&.strip).reject(&.empty?)
+    end
+
+    # Output shape: JSON, quiet and verbose.
+    private def self.define_output_flags(parser : OptionParser, options : Options) : Nil
+      parser.on("--json", "Machine-readable JSON output") { options.json = true }
+      parser.on("--quiet", "Suppress all output except errors") { options.quiet = true }
+      parser.on("--verbose", "Show unchanged files and detailed output") { options.verbose = true }
+      parser.on("--yes", "Skip confirmation prompt and apply immediately") { options.yes = true }
+    end
+
+    # PAT and GitHub App credentials.
+    private def self.define_auth_flags(parser : OptionParser, options : Options) : Nil
+      parser.on("--token TOKEN", "GitHub personal access token") { |v| options.token = v }
+      parser.on("--app-id ID", "GitHub App ID (for GitHub App auth)") { |v| options.app_id = v }
+      parser.on("--private-key PEM", "GitHub App private key (PEM content)") { |v| options.private_key = v }
+      parser.on("--private-key-path PATH", "Path to GitHub App private key PEM file") do |v|
+        options.private_key = File.read(v)
+      rescue ex
+        STDERR.puts "Error reading private key: #{ex.message}"
+        raise ExitSignal.new(2)
+      end
+      parser.on("--installation-id ID", "GitHub App installation ID") { |v| options.installation_id = v }
+    end
+
+    # Config path, in-place rewrite, version and help.
+    private def self.define_meta_flags(parser : OptionParser, options : Options) : Nil
+      parser.on("--config PATH", "Path to config file (default: .gitorules.yml)") { |v| options.config_path = v }
+      parser.on("--in-place", "Overwrite config file in place (migrate only)") do
+        options.in_place = true
+      end
+      parser.on("--version", "Show version") do
+        puts "gitorules v#{VERSION}"
+        raise ExitSignal.new(0)
+      end
+      parser.on("-h", "--help", "Show help") do
+        puts parser
+        raise ExitSignal.new(0)
+      end
     end
 
     private def self.run_with_options(options : Options, config_path : String, input_io : IO) : Int32
@@ -212,51 +192,57 @@ module Gitorules
         return handle_init(options, client)
       end
 
-      token = client.token
-      unless token
-        STDERR.puts "Error: no auth token available"
-        raise ExitSignal.new(2)
-      end
-
-      begin
-        loader = ConfigLoader.new(config_path, token)
-      rescue ex : UnknownScopeError
-        STDERR.puts "Error: #{ex.message}"
-        raise ExitSignal.new(2)
-      rescue ex
-        STDERR.puts "Error loading config: #{ex.message}"
-        raise ExitSignal.new(2)
-      end
-
-      begin
-        LabelsSync.validate!(loader.config)
-      rescue ex
-        STDERR.puts "Error loading config: #{ex.message}"
-        raise ExitSignal.new(2)
-      end
-
-      only_set = parse_only_option!(options.only)
-
-      if scope_name = options.scope
-        resolver = ScopeResolver.new(loader.config)
-        unless resolver.has_scope?(scope_name)
-          STDERR.puts "Error: unknown scope '#{scope_name}'. Available scopes: #{resolver.scope_names.join(", ")}. Check the `scopes:` section in your config file or run without --scope to use all scopes."
-          raise ExitSignal.new(2)
-        end
-      end
-
-      if nothing_to_do?(only_set)
-        unless options.quiet?
-          STDOUT.puts "Skipped branch, labels and workflows (--only #{options.only}). Nothing to do."
-        end
-        return 0
-      end
+      loader = load_config(config_path, require_token!(client))
+      validate_scope!(loader.config, options.scope)
+      return 0 if skip_run?(options)
 
       engine = Engine.new(client, loader.config)
 
       repos, scope_groups = resolve_repos(loader, options)
 
       execute_command(engine, repos, options, STDOUT, input_io, scope_groups)
+    end
+
+    # The PAT every network-backed command needs.
+    private def self.require_token!(client : GitHubClient) : String
+      token = client.token
+      return token if token
+
+      STDERR.puts "Error: no auth token available"
+      raise ExitSignal.new(2)
+    end
+
+    # True when `--only` selects no subsystem, in which case printing a
+    # one-line reason is the whole run.
+    private def self.skip_run?(options : Options) : Bool
+      return false unless nothing_to_do?(parse_only_option!(options.only))
+
+      STDOUT.puts "Skipped branch, labels and workflows (--only #{options.only}). Nothing to do." unless options.quiet?
+      true
+    end
+
+    # Loads and validates the config file, printing the same error text
+    # for every failure path so exit code 2 always reads the same.
+    private def self.load_config(config_path : String, token : String) : ConfigLoader
+      loader = ConfigLoader.new(config_path, token)
+      LabelsSync.validate!(loader.config)
+      loader
+    rescue ex : UnknownScopeError
+      STDERR.puts "Error: #{ex.message}"
+      raise ExitSignal.new(2)
+    rescue ex
+      STDERR.puts "Error loading config: #{ex.message}"
+      raise ExitSignal.new(2)
+    end
+
+    # Rejects an unknown --scope before any work starts.
+    private def self.validate_scope!(config : Config, scope_name : String?) : Nil
+      return unless scope_name
+      resolver = ScopeResolver.new(config)
+      return if resolver.has_scope?(scope_name)
+
+      STDERR.puts "Error: unknown scope '#{scope_name}'. Available scopes: #{resolver.scope_names.join(", ")}. Check the `scopes:` section in your config file or run without --scope to use all scopes."
+      raise ExitSignal.new(2)
     end
 
     # True when an `--only` filter selects none of the known subsystems.
@@ -299,30 +285,35 @@ module Gitorules
       end
 
       if loader.config.scopes
-        begin
-          groups = loader.scope_groups(options.scope, options.exclude)
-        rescue ex : UnknownScopeError
-          STDERR.puts "Error: #{ex.message}"
-          raise ExitSignal.new(2)
-        rescue ex
-          STDERR.puts "Error resolving scopes: #{ex.message}"
-          raise ExitSignal.new(2)
-        end
-        flat = [] of String
-        groups.each_value do |scope_repos|
-          scope_repos.each { |name| flat << name unless flat.includes?(name) }
-        end
+        groups = scope_groups(loader, options)
+        flat = groups.values.flatten
+        flat.uniq!
         return {flat, groups}
       end
 
-      begin
-        repos = loader.repo_names
+      {filtered_repo_names(loader, options.exclude), nil}
+    end
+
+    # Explicit repo list from a single-org config, minus --exclude.
+    private def self.filtered_repo_names(loader : ConfigLoader, exclude : Array(String)) : Array(String)
+      repos = begin
+        loader.repo_names
       rescue ex
         STDERR.puts "Error loading config: #{ex.message}"
         raise ExitSignal.new(2)
       end
-      repos = ScopeResolver.filter_exclude(repos, options.exclude) unless options.exclude.empty?
-      {repos, nil}
+      exclude.empty? ? repos : ScopeResolver.filter_exclude(repos, exclude)
+    end
+
+    # Expands named scopes into per-scope repo groups.
+    private def self.scope_groups(loader : ConfigLoader, options : Options) : Hash(String, Array(String))
+      loader.scope_groups(options.scope, options.exclude)
+    rescue ex : UnknownScopeError
+      STDERR.puts "Error: #{ex.message}"
+      raise ExitSignal.new(2)
+    rescue ex
+      STDERR.puts "Error resolving scopes: #{ex.message}"
+      raise ExitSignal.new(2)
     end
 
     # Parses `--only`, failing fast with exit code 2 on unknown values.
@@ -345,12 +336,7 @@ module Gitorules
     end
 
     private def self.execute_command(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO = STDIN, groups : Hash(String, Array(String))? = nil) : Int32
-      if options.dry_run? && options.mode != "apply"
-        STDERR.puts "Warning: --dry-run has no effect on '#{options.mode}' command"
-      end
-      if options.diff? && options.mode != "apply"
-        STDERR.puts "Warning: --diff has no effect on '#{options.mode}' command"
-      end
+      warn_ignored_flags(options)
 
       case options.mode
       when "status"
@@ -365,6 +351,23 @@ module Gitorules
       end
     end
 
+    # Warns when apply-only flags are passed to another command, so a
+    # silently ignored --dry-run never reads as a preview.
+    private def self.warn_ignored_flags(options : Options) : Nil
+      return if options.mode == "apply"
+      if options.dry_run? && !dry_run_aware?(options)
+        STDERR.puts "Warning: --dry-run has no effect on '#{options.mode}' command"
+      end
+      STDERR.puts "Warning: --diff has no effect on '#{options.mode}' command" if options.diff?
+    end
+
+    # Commands whose writes honor --dry-run: `apply` is handled above,
+    # `init --template` and `migrate --in-place` do their own checks.
+    private def self.dry_run_aware?(options : Options) : Bool
+      return true if options.mode == "migrate" && options.in_place?
+      options.mode == "init" && !options.template.nil?
+    end
+
     private def self.cmd_status(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
       if options.json?
         engine.status_json(repos, io, options.only)
@@ -375,46 +378,51 @@ module Gitorules
     end
 
     private def self.cmd_apply(engine : Engine, repos : Array(String), options : Options, io : IO, input_io : IO) : Int32
-      if options.diff?
-        if options.json?
-          engine.diff_json(repos, io, options.only)
-        else
-          engine.diff(repos, verbose: options.verbose?, io: io, only: options.only)
-        end
-        return 0
-      end
-
-      if options.json?
-        engine.apply_json(repos, dry_run: options.dry_run?, io: io, only: options.only)
-        return 0
-      end
+      return 0 if apply_readonly(engine, repos, options, io)
 
       diff_io = IO::Memory.new
       engine.diff(repos, verbose: options.verbose?, io: diff_io, only: options.only)
       diff_text = diff_io.to_s
       io.print diff_text unless options.quiet?
 
-      if diff_has_changes?(diff_text)
-        unless options.yes?
-          if deletion_planned?(diff_text)
-            STDERR.puts "WARNING: prune deletions planned — review before applying."
-          end
-          STDERR.print confirm_prompt(count_changes(diff_text), repos.size, options.scope)
-          answer = input_io.gets
-          unless answer && answer.strip.downcase == "y"
-            return 1
-          end
-        end
-
-        engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, verbose: options.verbose?, io: io, only: options.only)
-        1
-      else
+      unless diff_has_changes?(diff_text)
         io.puts "no changes" unless options.quiet?
-        0
+        return 0
       end
+
+      return 1 unless options.dry_run? || confirmed?(diff_text, repos, options, input_io)
+
+      engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, verbose: options.verbose?, io: io, only: options.only)
+      1
     rescue ex : WorkflowError
       STDERR.puts "Error: #{ex.message}"
       2
+    end
+
+    # `apply --diff` and `apply --json` never write. Returns true when one
+    # of them handled the run, so the interactive path below stays short.
+    private def self.apply_readonly(engine : Engine, repos : Array(String), options : Options, io : IO) : Bool
+      if options.diff?
+        options.json? ? engine.diff_json(repos, io, options.only) : engine.diff(repos, verbose: options.verbose?, io: io, only: options.only)
+        return true
+      end
+      return false unless options.json?
+
+      engine.apply_json(repos, dry_run: options.dry_run?, io: io, only: options.only)
+      true
+    end
+
+    # Asks before applying. `--yes` skips the prompt; anything but "y"
+    # keeps the changes unimplemented and returns 1, not an error.
+    private def self.confirmed?(diff_text : String, repos : Array(String), options : Options, input_io : IO) : Bool
+      return true if options.yes?
+
+      if deletion_planned?(diff_text)
+        STDERR.puts "WARNING: prune deletions planned — review before applying."
+      end
+      STDERR.print confirm_prompt(count_changes(diff_text), repos.size, options.scope)
+      answer = input_io.gets
+      !!answer && answer.strip.downcase == "y"
     end
 
     # Builds the apply confirmation prompt with blast radius.
@@ -552,19 +560,7 @@ module Gitorules
         return handle_init_template(options, client, template)
       end
 
-      repos = if repo = options.repo
-                [repo]
-              elsif org = options.org
-                begin
-                  client.list_repos(org).map { |name| "#{org}/#{name}" }
-                rescue ex
-                  STDERR.puts "Error listing repositories for org '#{org}': #{ex.message}"
-                  raise ExitSignal.new(2)
-                end
-              else
-                STDERR.puts "Error: --repo or --org required for init"
-                raise ExitSignal.new(2)
-              end
+      repos = init_repos(options, client)
 
       if repos.empty?
         STDERR.puts "Error: no repositories found"
@@ -574,6 +570,25 @@ module Gitorules
       generator = ConfigGenerator.new(client)
       generator.generate(repos)
       0
+    end
+
+    # Repositories to reverse-engineer for `init`, from --repo or --org.
+    private def self.init_repos(options : Options, client : GitHubClient) : Array(String)
+      if repo_name = options.repo
+        return [repo_name]
+      end
+
+      unless org = options.org
+        STDERR.puts "Error: --repo or --org required for init"
+        raise ExitSignal.new(2)
+      end
+
+      begin
+        client.list_repos(org).map { |name| "#{org}/#{name}" }
+      rescue ex
+        STDERR.puts "Error listing repositories for org '#{org}': #{ex.message}"
+        raise ExitSignal.new(2)
+      end
     end
 
     # Scaffolds a standard CI template into a fresh repository.
@@ -586,22 +601,27 @@ module Gitorules
         raise ExitSignal.new(2)
       end
 
-      unless repo = options.repo
+      repo = options.repo
+      unless repo
         STDERR.puts "Error: --repo required for init --template"
         raise ExitSignal.new(2)
       end
 
-      begin
-        generator = ConfigGenerator.new(client)
-        generator.scaffold_template(template, repo, STDOUT, options.dry_run?)
-      rescue ex : FileSyncError | WorkflowError
-        STDERR.puts "Error: #{ex.message}"
-        raise ExitSignal.new(2)
-      rescue ex
-        STDERR.puts "Error scaffolding template '#{template}' in #{repo}: #{ex.message}"
-        raise ExitSignal.new(2)
-      end
+      scaffold_template(client, template, repo, options.dry_run?)
       0
+    end
+
+    # Writes the template pack into *repo*, mapping both known errors and
+    # unexpected ones to exit code 2 with a distinct message.
+    private def self.scaffold_template(client : GitHubClient, template : String, repo : String, dry_run : Bool) : Nil
+      generator = ConfigGenerator.new(client)
+      generator.scaffold_template(template, repo, STDOUT, dry_run)
+    rescue ex : FileSyncError | WorkflowError
+      STDERR.puts "Error: #{ex.message}"
+      raise ExitSignal.new(2)
+    rescue ex
+      STDERR.puts "Error scaffolding template '#{template}' in #{repo}: #{ex.message}"
+      raise ExitSignal.new(2)
     end
   end
 end
