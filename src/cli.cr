@@ -65,7 +65,7 @@ module Gitorules
       when "lint"
         Linter.lint_file(options.config_path)
       when "migrate"
-        Migrator.migrate_file(options.config_path, options.in_place?)
+        Migrator.migrate_file(options.config_path, options.in_place?, dry_run: options.dry_run?)
       when "verify"
         Verifier.verify_file(options.config_path, options.scope, options.json?)
       else
@@ -115,7 +115,7 @@ module Gitorules
 
     # What to process: repository, scope, subsystem and exclusion filters.
     private def self.define_selection_flags(parser : OptionParser, options : Options) : Nil
-      parser.on("--dry-run", "Preview apply changes without making them") do
+      parser.on("--dry-run", "Preview every write without performing it") do
         options.dry_run = true
       end
       parser.on("--diff", "Show pending changes (same as diff command)") do
@@ -355,8 +355,17 @@ module Gitorules
     # silently ignored --dry-run never reads as a preview.
     private def self.warn_ignored_flags(options : Options) : Nil
       return if options.mode == "apply"
-      STDERR.puts "Warning: --dry-run has no effect on '#{options.mode}' command" if options.dry_run?
+      if options.dry_run? && !dry_run_aware?(options)
+        STDERR.puts "Warning: --dry-run has no effect on '#{options.mode}' command"
+      end
       STDERR.puts "Warning: --diff has no effect on '#{options.mode}' command" if options.diff?
+    end
+
+    # Commands whose writes honor --dry-run: `apply` is handled above,
+    # `init --template` and `migrate --in-place` do their own checks.
+    private def self.dry_run_aware?(options : Options) : Bool
+      return true if options.mode == "migrate" && options.in_place?
+      options.mode == "init" && !options.template.nil?
     end
 
     private def self.cmd_status(engine : Engine, repos : Array(String), options : Options, io : IO) : Int32
@@ -381,7 +390,7 @@ module Gitorules
         return 0
       end
 
-      return 1 unless confirmed?(diff_text, repos, options, input_io)
+      return 1 unless options.dry_run? || confirmed?(diff_text, repos, options, input_io)
 
       engine.apply(repos, dry_run: options.dry_run?, quiet: options.quiet?, verbose: options.verbose?, io: io, only: options.only)
       1

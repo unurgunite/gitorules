@@ -311,6 +311,18 @@ module Gitorules
         File.delete(path) if path && File.exists?(path)
       end
 
+      it "does not write the file with in_place and dry_run" do
+        path = File.join(Dir.tempdir, "migrate-dry-#{Random.rand(100000)}.yml")
+        original = "org: test\nrepos:\n  - r\nrules:\n  default_branch:\n    merge: only\n"
+        File.write(path, original)
+        err = IO::Memory.new
+        Migrator.migrate_file(path, true, IO::Memory.new, err, dry_run: true).should eq 0
+        File.read(path).should eq original
+        err.to_s.should contain "Dry run"
+      ensure
+        File.delete(path) if path && File.exists?(path)
+      end
+
       it "returns 2 for a missing file" do
         Migrator.migrate_file(File.join(Dir.tempdir, "migrate-missing-#{Random.rand(100000)}.yml"), false, IO::Memory.new, IO::Memory.new).should eq 2
       end

@@ -10,16 +10,11 @@ jobs:
   test:
     strategy:
       fail-fast: false
+      # One Crystal version everywhere, so a compiler change never lands
+      # on a single OS leg unnoticed.
       matrix:
-        include:
-          - os: ubuntu-latest
-            crystal: "1.22.3"
-          - os: macos-latest
-            crystal: latest
-          - os: macos-15-intel
-            crystal: latest
-          - os: windows-latest
-            crystal: latest
+        crystal: ["1.22.3"]
+        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
 
     runs-on: ${{ matrix.os }}
 

@@ -427,8 +427,6 @@ class Options
   property only : String? = nil
   # Repositories to exclude (owner/name, exact or glob).
   property exclude : Array(String) = [] of String
-  # Show detailed output.
-  property? verbose : Bool = false
   # Config file path gathered during parsing (default: .gitorules.yml).
   property config_path : String = ".gitorules.yml"
   # Overwrite the config in place (migrate only).
