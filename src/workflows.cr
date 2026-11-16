@@ -156,35 +156,45 @@ module Gitorules
       end
       return base if extra.strip.empty?
 
-      begin
-        parsed = YAML.parse(extra)
-      rescue ex : YAML::ParseException
-        raise WorkflowError.new("Invalid extra_steps YAML (#{ex.message}). Fix: provide a YAML list of steps starting with '- name: ...'.")
-      end
-      unless parsed.as_a?
-        raise WorkflowError.new("Invalid extra_steps content: expected a YAML list of steps. Fix: start the file with '- name: ...'.")
-      end
-
-      base_lines = base.split("\n")
+      validate_extra_steps!(extra)
       had_trailing_newline = base.ends_with?("\n")
-      # Drop the artifact empty element from a trailing newline for indexing.
-      base_lines.pop if had_trailing_newline && !base_lines.empty? && base_lines.last.empty?
-
+      base_lines = indexed_lines(base)
       idx = base_lines.index { |line| anchor_line?(line, clean_anchor) }
       unless idx
         raise WorkflowError.new("Unknown extra_steps anchor '#{clean_anchor}': anchor marker not found in base template")
       end
 
-      extra_lines = extra.rstrip("\n").split("\n")
-      resolved = [] of String
-      resolved.concat(base_lines[0..idx])
-      resolved.concat(extra_lines)
-      if idx + 1 < base_lines.size
-        resolved.concat(base_lines[(idx + 1)..])
-      end
-      result = resolved.join("\n")
+      result = splice_steps(base_lines, idx, extra)
       result += "\n" if had_trailing_newline || !result.ends_with?("\n")
       result
+    end
+
+    # Splits template content into lines, dropping the empty element a
+    # trailing newline leaves behind.
+    private def self.indexed_lines(base : String) : Array(String)
+      lines = base.split("\n")
+      lines.pop if base.ends_with?("\n") && !lines.empty? && lines.last.empty?
+      lines
+    end
+
+    private def self.validate_extra_steps!(extra : String) : Nil
+      parsed = begin
+        YAML.parse(extra)
+      rescue ex : YAML::ParseException
+        raise WorkflowError.new("Invalid extra_steps YAML (#{ex.message}). Fix: provide a YAML list of steps starting with '- name: ...'.")
+      end
+      return if parsed.as_a?
+
+      raise WorkflowError.new("Invalid extra_steps content: expected a YAML list of steps. Fix: start the file with '- name: ...'.")
+    end
+
+    # Inserts *extra* steps after the anchor line at *idx*.
+    private def self.splice_steps(base_lines : Array(String), idx : Int32, extra : String) : String
+      resolved = [] of String
+      resolved.concat(base_lines[0..idx])
+      resolved.concat(extra.rstrip("\n").split("\n"))
+      resolved.concat(base_lines[(idx + 1)..]) if idx + 1 < base_lines.size
+      resolved.join("\n")
     end
 
     # Validates every workflow target before any API write.
@@ -232,20 +242,20 @@ module Gitorules
       validate!(workflows)
       plans = [] of WorkflowPlan
       workflows.each do |key, entry|
-        target = self.class.target_path(key)
-        resolved = resolve_entry(key, entry)
-        local = apply_configured_extra_steps(resolved.content, entry)
-        local_sha = self.class.blob_sha(local)
-        remote = @client.get_contents(repo, target)
-        if remote && remote[:sha] == local_sha
-          plans << WorkflowPlan.new(target, "unchanged", local, remote[:sha], entry.source || "", local_sha, resolved.source.remote? ? resolved.source.ref : nil)
-        elsif remote
-          plans << WorkflowPlan.new(target, "update", local, remote[:sha], entry.source || "", local_sha, resolved.source.remote? ? resolved.source.ref : nil)
-        else
-          plans << WorkflowPlan.new(target, "create", local, nil, entry.source || "", local_sha, resolved.source.remote? ? resolved.source.ref : nil)
-        end
+        plans << plan_entry(repo, key, entry)
       end
       plans
+    end
+
+    private def plan_entry(repo : String, key : String, entry : WorkflowConfig) : WorkflowPlan
+      target = self.class.target_path(key)
+      resolved = resolve_entry(key, entry)
+      local = apply_configured_extra_steps(resolved.content, entry)
+      local_sha = self.class.blob_sha(local)
+      remote_sha = @client.get_contents(repo, target).try(&.[:sha])
+      action = remote_sha.nil? ? "create" : (remote_sha == local_sha ? "unchanged" : "update")
+      ref = resolved.source.remote? ? resolved.source.ref : nil
+      WorkflowPlan.new(target, action, local, remote_sha, entry.source || "", local_sha, ref)
     end
 
     # Syncs workflows for a repo, writing via the Contents API.

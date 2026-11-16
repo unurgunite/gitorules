@@ -116,7 +116,7 @@ gitorules <status|apply|diff|init|lint|migrate|verify> [options]
 
 | Flag            | Description                                          |
 |-----------------|------------------------------------------------------|
-| `--dry-run`     | Preview apply changes without making them            |
+| `--dry-run`     | Preview every write without performing it            |
 | `--diff`        | Show pending changes (same as `diff` command)        |
 | `--repo REPO`   | Target a single repository (`owner/name`)            |
 | `--scope NAME`  | Only process repositories in this scope             |
@@ -138,6 +138,18 @@ gitorules <status|apply|diff|init|lint|migrate|verify> [options]
 
 Before applying changes, `gitorules apply` shows a diff and asks for confirmation. Use `--yes` to skip the prompt in
 scripts/automation.
+
+**Dry run:**
+
+`--dry-run` previews writes for every command that has any, and performs none of them:
+
+| Command | `--dry-run` effect |
+|---------|--------------------|
+| `apply` | Zero write requests, prints `Would create/update ...`. Skips the confirmation prompt |
+| `apply --json` | Same, with `"dry_run": true` on each entry |
+| `init --template` | Prints `Would create/update file ...` instead of writing |
+| `migrate --in-place` | Prints `Dry run: ... would be migrated` and leaves the file untouched |
+| `init`, `status`, `diff`, `lint`, `verify` | Nothing to suppress — these never write. `init` prints to stdout only |
 
 ### Exit codes
 

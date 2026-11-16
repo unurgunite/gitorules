@@ -102,9 +102,16 @@ module Gitorules
       def status(repos : Array(String), quiet : Bool = false, io : IO = STDOUT, only : String? = nil)
         types = @config.all_type_keys
         status_print_header(types, io) unless quiet || branch_skipped?(only)
+        errors = print_status_outputs(status_collect(repos, types, quiet, only, io), io)
+        n = repos.size
+        io.puts(errors.zero? ? status_summary_line(only, n) : "Done: #{n} repos processed, #{errors} error(s)")
+      end
+
+      # Runs status for every repo in parallel, keeping output ordered.
+      private def status_collect(repos : Array(String), types : Array(String), quiet : Bool, only : String?, io : IO) : Array({String, Bool})
         total = repos.size
         is_tty = colorize?(io)
-        outputs = Concurrent.map_ordered(repos) do |repo, idx|
+        Concurrent.map_ordered(repos) do |repo, idx|
           prefix = "[#{idx + 1}/#{total}] "
           buf = TtyMemory.new(is_tty)
           failed = false
@@ -116,17 +123,16 @@ module Gitorules
           end
           {buf.to_s, failed}
         end
+      end
+
+      # Prints buffered output and returns how many repos failed.
+      private def print_status_outputs(outputs : Array({String, Bool}), io : IO) : Int32
         errors = 0
         outputs.each do |(text, failed)|
           io.print(text)
           errors += 1 if failed
         end
-        n = repos.size
-        if errors == 0
-          io.puts status_summary_line(only, n)
-        else
-          io.puts "Done: #{n} repos processed, #{errors} error(s)"
-        end
+        errors
       end
 
       # Summary line for status that reflects the active `only` filter.
@@ -138,25 +144,11 @@ module Gitorules
         parts = only_parts(only)
         return "All branch rules up to date" if parts.nil?
 
-        has_branch = parts.includes?("branch")
-        has_labels = parts.includes?("labels")
-        has_workflows = parts.includes?("workflows")
+        subjects = {"branch" => "branch rules", "labels" => "labels", "workflows" => "workflows"}
+        selected = subjects.keys.select { |key| parts.includes?(key) }.map { |key| subjects[key] }
+        return "Done: #{repo_count} repos processed" if selected.empty?
 
-        if has_branch && has_labels
-          "All branch rules and labels up to date"
-        elsif has_branch && has_workflows
-          "All branch rules and workflows up to date"
-        elsif has_branch
-          "All branch rules up to date"
-        elsif has_labels && has_workflows
-          "All labels and workflows up to date"
-        elsif has_labels
-          "All labels up to date"
-        elsif has_workflows
-          "All workflows up to date"
-        else
-          "Done: #{repo_count} repos processed"
-        end
+        "All #{selected.join(" and ")} up to date"
       end
 
       private def status_repo(io : IO, repo : String, types : Array(String), prefix : String, quiet : Bool, only : String?)
@@ -218,15 +210,19 @@ module Gitorules
         outputs = Concurrent.map_ordered(repos) do |repo, idx|
           prefix = "[#{idx + 1}/#{total}] "
           buf = TtyMemory.new(is_tty)
-          begin
-            diff_repo(repo, buf, prefix, quiet, only, verbose)
-          rescue ex
-            buf.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
-          end
+          diff_repo_safely(repo, buf, prefix, quiet, only, verbose)
           buf.to_s
         end
         outputs.each { |text| io.print(text) }
         io.puts "Done: #{repos.size} repos processed"
+      end
+
+      # Runs `diff_repo`, turning a failure into one error line so a single
+      # broken repo does not abort the whole run.
+      private def diff_repo_safely(repo : String, buf : IO, prefix : String, quiet : Bool, only : String?, verbose : Bool) : Nil
+        diff_repo(repo, buf, prefix, quiet, only, verbose)
+      rescue ex
+        buf.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
       end
 
       # Validates workflow config for all repos before any API write.
@@ -291,22 +287,22 @@ module Gitorules
         outputs = Concurrent.map_ordered(repos) do |repo, idx|
           prefix = "[#{idx + 1}/#{total}] "
           buf = TtyMemory.new(is_tty)
-          failed = false
-          begin
-            apply_repo(repo, dry_run, buf, prefix, quiet, only, verbose)
-          rescue ex
-            buf.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
-            failed = true
-          end
+          failed = apply_repo_safely(repo, dry_run, buf, prefix, quiet, only, verbose)
           {buf.to_s, failed}
         end
-        errors = 0
-        outputs.each do |(text, failed)|
-          io.print(text)
-          errors += 1 if failed
-        end
+        errors = print_status_outputs(outputs, io)
         n = repos.size
         io.puts "Done: #{n} repos processed, #{errors} error(s)"
+      end
+
+      # Runs `apply_repo`, turning a failure into one error line so other
+      # repos still apply.
+      private def apply_repo_safely(repo : String, dry_run : Bool, buf : IO, prefix : String, quiet : Bool, only : String?, verbose : Bool) : Bool
+        apply_repo(repo, dry_run, buf, prefix, quiet, only, verbose)
+        false
+      rescue ex
+        buf.puts "#{prefix}#{repo}: Error: #{ex.message}" unless quiet
+        true
       end
 
       def apply_json(repos : Array(String), dry_run : Bool = false, io : IO = STDOUT, only : String? = nil)
@@ -348,9 +344,10 @@ module Gitorules
       end
 
       private def status_print_header(types : Array(String), io : IO)
-        header = pad_to("Repository", 40) + " "
-        types.each { |t| header += pad_to(type_label(t), 24) + " " }
-        io.puts header
+        io.puts(String.build do |b|
+          b << pad_to("Repository", 40) << " "
+          types.each { |t| b << pad_to(type_label(t), 24) << " " }
+        end)
         io.puts "─" * (41 + types.size * 25)
       end
 
@@ -366,37 +363,42 @@ module Gitorules
           return
         end
 
-        line = pad_to(repo, 40) + " "
-        types.each { |t| line += pad_to(results.fetch(t, red("✗ MISSING", io)), 24) + " " }
-        io.puts "#{prefix}#{line}" unless quiet
+        cells = types.map { |t| results.fetch(t, red("✗ MISSING", io)) }
+        io.puts "#{prefix}#{status_line(repo, cells)}" unless quiet
       end
 
       private def error_io_line(repo : String, types : Array(String), prefix : String = "", io : IO = STDOUT) : String
-        line = pad_to(repo, 40) + " "
-        types.each { |_| line += pad_to(red("ERR", io), 24) + " " }
-        "#{prefix}#{line}"
+        "#{prefix}#{status_line(repo, types.map { red("ERR", io) })}"
+      end
+
+      # Pads the repo name and each status cell into one aligned row.
+      private def status_line(repo : String, cells : Array(String)) : String
+        String.build do |row|
+          row << pad_to(repo, 40) << " "
+          cells.each { |cell| row << pad_to(cell, 24) << " " }
+        end
       end
 
       private def status_type_result(repo : String, rulesets : Array(Ruleset), type : String, rules : Hash(String, BranchRuleConfig)?, io : IO) : String
         rule_config = rules.try { |r| r[type] }
         names = type_match_names(type, rule_config)
-        rs = rulesets.find(&.name.in?(names))
-        id = rs.try(&.id)
+        id = rulesets.find(&.name.in?(names)).try(&.id)
         return red("✗ MISSING", io) unless id
 
         full = @client.get_ruleset(repo, id)
-        pr_rule = full.rules.find { |r| r.type == "pull_request" }
-        params = pr_rule.try(&.parameters)
-        return red("✗ MISSING", io) unless params
+        method = merge_method_of(full)
+        return red("✗ MISSING", io) unless method
 
-        methods = params["allowed_merge_methods"]?.try(&.as_a)
-        return red("✗ MISSING", io) unless methods
+        wanted = rule_config.try(&.merge_method)
+        status = wanted.nil? || wanted == method ? green("✓ #{method}", io) : red("✗ #{method}", io)
+        (status.to_s + checks_status_label(full, rule_config, io)).to_s
+      end
 
-        method = methods.first?.to_s
-        method_ok = rule_config.try(&.merge_method) == method || !rule_config.try(&.merge_method)
-        status = method_ok ? green("✓ #{method}", io) : red("✗ #{method}", io)
-        status = status.to_s + checks_status_label(full, rule_config, io)
-        status.to_s
+      # Allowed merge method of the pull_request rule, or nil when the
+      # ruleset has no such rule.
+      private def merge_method_of(full : Ruleset) : String?
+        params = full.rules.find { |r| r.type == "pull_request" }.try(&.parameters)
+        params.try(&.["allowed_merge_methods"]?).try(&.as_a).try(&.first?).try(&.to_s)
       end
 
       private def checks_status_label(full : Ruleset, config : BranchRuleConfig?, io : IO) : String
@@ -410,44 +412,41 @@ module Gitorules
         actual = params["required_status_checks"]?.try(&.as_a).try { |a| a.map { |c| c.as_h["context"]?.try(&.to_s) } }
         return yellow(" -checks", io) unless actual
 
-        if config.try(&.glob_checks?) && (cfg = config)
-          actual_str = actual.compact
-          cfg.checks_match?(actual_str) ? green(" +checks", io) : yellow(" ~checks", io)
-        else
-          actual == expected ? green(" +checks", io) : yellow(" ~checks", io)
-        end
+        matches = config && config.glob_checks? ? config.checks_match?(actual.compact) : actual == expected
+        matches ? green(" +checks", io) : yellow(" ~checks", io)
       end
 
       private def status_json_repo(json : JSON::Builder, repo : String, types : Array(String), only : String? = nil)
-        unless branch_skipped?(only)
-          rules = @config.rules_for(repo)
-          rulesets = @client.list_rulesets(repo)
-          json.field "types" do
-            json.object do
-              types.each do |type|
-                rule_config = rules.try { |r| r[type] }
-                names = type_match_names(type, rule_config)
-                rs = rulesets.find(&.name.in?(names))
-                json.field type do
-                  status_json_type(json, repo, rs, rule_config, type)
-                end
-              end
-            end
-          end
-        end
-        if labels_wanted?(only)
-          entries = label_resource.diff_entries(repo)
-          json.field "labels" do
-            json.array do
-              entries.each { |e| label_resource.write_json_entry(json, repo, e) }
-            end
-          end
-        end
+        render_status_json_types(json, repo, types) unless branch_skipped?(only)
+        render_status_json_labels(json, repo) if labels_wanted?(only)
       rescue ex
         json.field "resource", ""
         json.field "action", "error"
         json.field "changes", [] of String
         json.field "error", ex.message
+      end
+
+      private def render_status_json_types(json : JSON::Builder, repo : String, types : Array(String)) : Nil
+        rules = @config.rules_for(repo)
+        rulesets = @client.list_rulesets(repo)
+        json.field "types" do
+          json.object do
+            types.each do |type|
+              rule_config = rules.try { |r| r[type] }
+              rs = rulesets.find(&.name.in?(type_match_names(type, rule_config)))
+              json.field(type) { status_json_type(json, repo, rs, rule_config, type) }
+            end
+          end
+        end
+      end
+
+      private def render_status_json_labels(json : JSON::Builder, repo : String) : Nil
+        entries = label_resource.diff_entries(repo)
+        json.field "labels" do
+          json.array do
+            entries.each { |e| label_resource.write_json_entry(json, repo, e) }
+          end
+        end
       end
 
       private def status_json_type(json : JSON::Builder, repo : String, rs : Ruleset?, rule_config : BranchRuleConfig?, type : String? = nil)
@@ -502,11 +501,6 @@ module Gitorules
         nil
       end
 
-      private def resolve_method_ok(methods : Array(JSON::Any)?, method : String?, expected : String?) : Bool?
-        return unless methods
-        expected.nil? || expected == method
-      end
-
       private def resolve_checks_ok(full : Ruleset, rule_config : BranchRuleConfig?, expected_checks : Array(String)?) : {Bool?, Array(String)}
         return {nil, [] of String} unless expected_checks
         checks_rule = full.rules.find { |r| r.type == "required_status_checks" }
@@ -537,34 +531,28 @@ module Gitorules
       end
 
       private def write_full_status_entry(json : JSON::Builder, full : Ruleset, rule_config : BranchRuleConfig?)
-        pr_rule = full.rules.find { |r| r.type == "pull_request" }
-        params = pr_rule.try(&.parameters)
-        methods = params.try { |p| p["allowed_merge_methods"]?.try(&.as_a) }
-
-        method = methods.try(&.first?.to_s)
+        method = merge_method_of(full)
         expected = rule_config.try(&.merge_method)
-        method_ok = resolve_method_ok(methods, method, expected)
+        method_ok = method.nil? ? nil : (expected.nil? || expected == method)
 
         expected_checks = rule_config.try(&.checks)
         checks_ok, actual_str = resolve_checks_ok(full, rule_config, expected_checks)
-
         changes = status_change_descriptions(method_ok, method, expected, checks_ok, expected_checks, actual_str)
-        action = (method_ok == false || checks_ok == false) ? "update" : "unchanged"
+        write_status_entry_fields(json, full, method, method_ok, checks_ok, expected_checks, changes)
+      end
 
+      private def write_status_entry_fields(json : JSON::Builder, full : Ruleset, method : String?, method_ok : Bool?, checks_ok : Bool?, expected_checks : Array(String)?, changes : Array(String)) : Nil
         json.object do
           json.field "exists", true
           json.field "name", full.name
           json.field "resource", full.name
 
-          if methods && method
+          if method
             json.field "merge_method", method
             json.field "merge_method_ok", method_ok
           end
-
-          if expected_checks
-            json.field "checks_ok", checks_ok
-          end
-          json.field "action", action
+          json.field("checks_ok", checks_ok) if expected_checks
+          json.field "action", (method_ok == false || checks_ok == false) ? "update" : "unchanged"
           json.field "changes", changes
         end
       end
@@ -574,79 +562,45 @@ module Gitorules
         entries = [] of DiffEntry
         matched = Set(String).new
 
-        if repo_rules
-          repo_rules.each do |type, config|
-            wanted = build_type_ruleset(type, config)
-            names = type_match_names(type, config)
-            found = existing.find(&.name.in?(names))
-            matched << found.name if found
-
-            unless found
-              entries << DiffEntry.create(wanted)
-              next
-            end
-
-            id = found.id
-            unless id
-              entries << DiffEntry.create(wanted)
-              next
-            end
-
-            begin
-              full = @client.get_ruleset(repo, id)
-            rescue ex
-              entries << DiffEntry.fetch_error(wanted, ex.message)
-              next
-            end
-
-            entries << compare_rulesets(wanted, full, config)
-          end
-        end
-
+        repo_rules.try(&.each { |type, config| entries << compare_type(repo, type, config, existing, matched) })
         existing.each do |rs|
-          next if rs.name.in?(matched)
-          entries << DiffEntry.orphan(rs.name)
+          entries << DiffEntry.orphan(rs.name) unless rs.name.in?(matched)
+        end
+        entries
+      end
+
+      # Diff entry for one configured rule type: create it when missing,
+      # otherwise compare against the full remote ruleset.
+      private def compare_type(repo : String, type : String, config : BranchRuleConfig, existing : Array(Ruleset), matched : Set(String)) : DiffEntry
+        wanted = build_type_ruleset(type, config)
+        names = type_match_names(type, config)
+        found = existing.find(&.name.in?(names))
+        matched << found.name if found
+        return DiffEntry.create(wanted) unless found
+
+        id = found.id
+        return DiffEntry.create(wanted) unless id
+
+        begin
+          full = @client.get_ruleset(repo, id)
+        rescue ex
+          return DiffEntry.fetch_error(wanted, ex.message)
         end
 
-        entries
+        compare_rulesets(wanted, full, config)
       end
 
       # Compares a wanted ruleset against the full existing ruleset.
       private def compare_rulesets(wanted : Ruleset, full : Ruleset, config : BranchRuleConfig) : DiffEntry
-        existing_types = Set.new(full.rules.map(&.type))
-        wanted_types = Set.new(wanted.rules.map(&.type))
-
-        added = (wanted_types - existing_types).to_a
-        removed = (existing_types - wanted_types).to_a
-        if config.glob_checks?
-          removed.delete("required_status_checks")
-        end
-
-        param_changes = [] of String
-        wanted.rules.each do |wanted_rule|
-          existing_rule = full.rules.find { |r| r.type == wanted_rule.type }
-          next unless existing_rule
-
-          wanted_params = wanted_rule.parameters
-          existing_params = existing_rule.parameters
-          next unless wanted_params && existing_params
-
-          wanted_params.each do |key, wanted_val|
-            existing_val = existing_params[key]?
-            if existing_val != wanted_val
-              param_changes << "#{key}: #{existing_val} → #{wanted_val}"
-            end
-          end
-        end
-
+        added, removed = rule_type_changes(wanted, full, config)
+        param_changes = rule_param_changes(wanted, full)
         glob_matched = config.glob_checks? && full.rules.any? { |r| r.type == "required_status_checks" }
-        name = wanted.name
 
         if added.empty? && removed.empty? && param_changes.empty? && !glob_matched
-          DiffEntry.new(DiffEntry::Kind::Unchanged, name, wanted: wanted)
+          DiffEntry.new(DiffEntry::Kind::Unchanged, wanted.name, wanted: wanted)
         else
           DiffEntry.new(
-            DiffEntry::Kind::Update, name,
+            DiffEntry::Kind::Update, wanted.name,
             wanted: wanted,
             added: added,
             removed: removed,
@@ -654,6 +608,32 @@ module Gitorules
             glob_matched: glob_matched
           )
         end
+      end
+
+      # Rule types only on one side. With glob checks the check rule is
+      # matched locally, so a missing one is not a removal.
+      private def rule_type_changes(wanted : Ruleset, full : Ruleset, config : BranchRuleConfig) : {Array(String), Array(String)}
+        existing_types = Set.new(full.rules.map(&.type))
+        removed = (existing_types - Set.new(wanted.rules.map(&.type))).to_a
+        removed.delete("required_status_checks") if config.glob_checks?
+        {(Set.new(wanted.rules.map(&.type)) - existing_types).to_a, removed}
+      end
+
+      # Human-readable differences between rule parameters of the wanted and
+      # existing ruleset, matched by rule type.
+      private def rule_param_changes(wanted : Ruleset, full : Ruleset) : Array(String)
+        changes = [] of String
+        wanted.rules.each do |wanted_rule|
+          wanted_params = wanted_rule.parameters
+          existing_params = full.rules.find { |r| r.type == wanted_rule.type }.try(&.parameters)
+          next unless wanted_params && existing_params
+
+          wanted_params.each do |key, wanted_val|
+            existing_val = existing_params[key]?
+            changes << "#{key}: #{existing_val} → #{wanted_val}" if existing_val != wanted_val
+          end
+        end
+        changes
       end
 
       private def diff_repo(repo : String, io : IO, prefix : String = "", quiet : Bool = false, only : String? = nil, verbose : Bool = false)
@@ -991,61 +971,61 @@ module Gitorules
       end
 
       private def apply_json_repo(json : JSON::Builder, repo : String, dry_run : Bool, only : String? = nil)
-        existing = [] of Ruleset
-        unless branch_skipped?(only)
-          begin
-            existing = @client.list_rulesets(repo)
-          rescue ex
-            json.object do
-              json.field "repo", repo
-              json.field "resource", ""
-              json.field "action", "error"
-              json.field "changes", [] of String
-              json.field "error", ex.message
-            end
-            return
-          end
-        end
+        existing = branch_skipped?(only) ? [] of Ruleset : fetch_json_rulesets(repo, json)
+        return unless existing
 
-        label_entries = [] of LabelChange
-        if labels_wanted?(only)
-          begin
-            label_entries = label_resource.apply_preview(repo)
-          rescue ex
-            json.object do
-              json.field "repo", repo
-              json.field "resource", ""
-              json.field "action", "error"
-              json.field "changes", [] of String
-              json.field "error", ex.message
-            end
-            return
-          end
-        end
+        label_entries = labels_wanted?(only) ? fetch_json_labels(repo, json) : [] of LabelChange
+        return unless label_entries
 
         json.object do
           json.field "repo", repo
           json.field "results" do
             json.array do
-              unless branch_skipped?(only)
-                unless @config.rules_for(repo)
-                  render_json_skip(json)
-                  next
-                end
-                if repo_rules = @config.rules_for(repo)
-                  repo_rules.each do |type, config|
-                    wanted = build_type_ruleset(type, config)
-                    names = type_match_names(type, config)
-                    found = existing.find(&.name.in?(names))
-                    apply_json_ruleset(json, repo, found, wanted, config, dry_run)
-                  end
-                end
-              end
+              render_apply_ruleset_entries(json, repo, existing, only, dry_run)
               label_entries.each { |e| label_resource.write_json_entry(json, repo, e, dry_run) }
               render_apply_workflow_entries(json, repo, only, dry_run) if workflows_wanted?(only)
               render_apply_file_entries(json, repo, only, dry_run) if files_wanted?(only)
             end
           end
+        end
+      end
+
+      # Rule entries of one repo: skip marker when unconfigured, otherwise
+      # one entry per configured type.
+      private def render_apply_ruleset_entries(json : JSON::Builder, repo : String, existing : Array(Ruleset), only : String?, dry_run : Bool) : Nil
+        return if branch_skipped?(only)
+        return render_json_skip(json) unless @config.rules_for(repo)
+
+        @config.rules_for(repo).try &.each do |type, config|
+          wanted = build_type_ruleset(type, config)
+          found = existing.find(&.name.in?(type_match_names(type, config)))
+          apply_json_ruleset(json, repo, found, wanted, config, dry_run)
+        end
+      end
+
+      # Lists rulesets for the JSON apply report. On failure it writes the
+      # error entry and returns nil so the caller stops.
+      private def fetch_json_rulesets(repo : String, json : JSON::Builder) : Array(Ruleset)?
+        @client.list_rulesets(repo)
+      rescue ex
+        write_json_repo_error(json, repo, ex)
+        nil
+      end
+
+      private def fetch_json_labels(repo : String, json : JSON::Builder) : Array(LabelChange)?
+        label_resource.apply_preview(repo)
+      rescue ex
+        write_json_repo_error(json, repo, ex)
+        nil
+      end
+
+      private def write_json_repo_error(json : JSON::Builder, repo : String, ex : Exception) : Nil
+        json.object do
+          json.field "repo", repo
+          json.field "resource", ""
+          json.field "action", "error"
+          json.field "changes", [] of String
+          json.field "error", ex.message
         end
       end
 
@@ -1089,26 +1069,24 @@ module Gitorules
       end
 
       private def apply_json_ruleset(json : JSON::Builder, repo : String, existing : Ruleset?, wanted : Ruleset, config : BranchRuleConfig, dry_run : Bool)
-        if dry_run || (!existing || !existing.id)
-          action = (!existing || !existing.id) ? "create" : "update"
-          json.object do
-            json.field "action", action
-            json.field "name", wanted.name
-            json.field "resource", wanted.name
-            json.field "changes", [] of String
-            json.field "dry_run", true if dry_run
-            json.field "id", existing.id if existing && existing.id
-            json_apply_checks_skipped(json, action, config)
-          end
+        existing_id = existing.try(&.id)
+        if dry_run || !existing_id
+          write_apply_ruleset_entry(json, wanted.name, existing_id ? "update" : "create", existing_id, dry_run, config)
           return
         end
 
+        write_apply_ruleset_entry(json, wanted.name, "update", existing_id, false, nil)
+      end
+
+      private def write_apply_ruleset_entry(json : JSON::Builder, name : String, action : String, id : Int64?, dry_run : Bool, config : BranchRuleConfig?) : Nil
         json.object do
-          json.field "action", "update"
-          json.field "name", wanted.name
-          json.field "resource", wanted.name
+          json.field "action", action
+          json.field "name", name
+          json.field "resource", name
           json.field "changes", [] of String
-          json.field "id", existing.id
+          json.field "dry_run", true if dry_run
+          json.field "id", id if id
+          json_apply_checks_skipped(json, action, config) if config
         end
       end
 
@@ -1119,29 +1097,18 @@ module Gitorules
       end
 
       private def apply_repo(repo : String, dry_run : Bool, io : IO, prefix : String = "", quiet : Bool = false, only : String? = nil, verbose : Bool = false)
-        unless branch_skipped?(only)
-          existing = @client.list_rulesets(repo)
+        apply_rulesets(repo, dry_run, io, prefix, quiet, only) unless branch_skipped?(only)
+        label_resource.apply(repo, dry_run, quiet, io, prefix) if labels_wanted?(only)
+        apply_workflows(repo, dry_run, io, prefix, quiet, verbose) if workflows_wanted?(only)
+        apply_files(repo, dry_run, io, prefix, quiet, verbose) if files_wanted?(only)
+      end
 
-          if repo_rules = @config.rules_for(repo)
-            repo_rules.each do |type, config|
-              wanted = build_type_ruleset(type, config)
-              names = type_match_names(type, config)
-              found = existing.find(&.name.in?(names))
-              apply_ruleset(repo, found, wanted, config, dry_run, io, prefix, quiet)
-            end
-          end
-        end
-
-        if labels_wanted?(only)
-          label_resource.apply(repo, dry_run, quiet, io, prefix)
-        end
-
-        if workflows_wanted?(only)
-          apply_workflows(repo, dry_run, io, prefix, quiet, verbose)
-        end
-
-        if files_wanted?(only)
-          apply_files(repo, dry_run, io, prefix, quiet, verbose)
+      private def apply_rulesets(repo : String, dry_run : Bool, io : IO, prefix : String, quiet : Bool, only : String?) : Nil
+        existing = @client.list_rulesets(repo)
+        @config.rules_for(repo).try &.each do |type, config|
+          wanted = build_type_ruleset(type, config)
+          found = existing.find(&.name.in?(type_match_names(type, config)))
+          apply_ruleset(repo, found, wanted, config, dry_run, io, prefix, quiet)
         end
       end
 

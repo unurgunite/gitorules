@@ -82,23 +82,23 @@ module Gitorules
       patterns = scope.repos || [] of String
       excludes = scope.exclude || [] of String
 
-      candidates = if avail = available
-                     result = [] of String
-                     patterns.each do |pattern|
-                       if self.class.glob?(pattern)
-                         avail.each do |repo|
-                           result << repo if self.class.matches?(pattern, repo) && !result.includes?(repo)
-                         end
-                       else
-                         result << pattern unless result.includes?(pattern)
-                       end
-                     end
-                     result
-                   else
-                     patterns.reject { |pattern| self.class.glob?(pattern) }
-                   end
+      candidates = self.class.expand_scope_patterns(available, patterns)
+      candidates.reject! { |repo| excluded?(repo, excludes) }
+      candidates.uniq!
+    end
 
-      candidates.reject { |repo| excluded?(repo, excludes) }.uniq!
+    # Expands repo patterns against the available repository list, or just
+    # keeps the literal patterns when no list is known.
+    def self.expand_scope_patterns(available : Array(String)?, patterns : Array(String)) : Array(String)
+      result = [] of String
+      patterns.each do |pattern|
+        if glob?(pattern)
+          available.try(&.each { |repo| result << repo if matches?(pattern, repo) })
+        else
+          result << pattern
+        end
+      end
+      result
     end
 
     # Effective branch rules for *repo*.
@@ -108,17 +108,7 @@ module Gitorules
     # Legacy configs (no `scopes`) fall back to `org`/`orgs` lookup.
     def effective_rules(repo : String, scope_name : String? = nil) : Hash(String, BranchRuleConfig)?
       scopes = @config.scopes
-      unless scopes
-        return @config.rules if @config.rules
-
-        org_name = repo.split("/").first?
-        if org_name && (orgs = @config.orgs)
-          if org_config = orgs[org_name]?
-            return org_config.rules
-          end
-        end
-        return
-      end
+      return legacy_rules(repo) unless scopes
 
       base = @config.defaults.try(&.rules)
       if name = scope_name
@@ -130,6 +120,17 @@ module Gitorules
       return base unless owner
 
       self.class.merge_rules(base, scopes[owner].rules)
+    end
+
+    # Rules for a config without `scopes`: the flat `rules` map, else the
+    # owning org's rules.
+    private def legacy_rules(repo : String) : Hash(String, BranchRuleConfig)?
+      return @config.rules if @config.rules
+
+      org_name = repo.split("/").first?
+      return unless org_name
+
+      @config.orgs.try(&.[org_name]?).try(&.rules)
     end
 
     # Returns true if *repo* matches any pattern in *patterns*.
@@ -175,12 +176,11 @@ module Gitorules
       cleaned = raw.strip
       return if cleaned.empty?
 
-      parts = cleaned.split(",").map(&.strip.downcase).reject(&.empty?).uniq!
+      parts = Set(String).new(cleaned.split(",").map(&.strip.downcase).reject(&.empty?))
       invalid = parts.reject { |part| VALID_ONLY_VALUES.includes?(part) }
-      unless invalid.empty?
-        raise ArgumentError.new("Unknown --only value(s): #{invalid.join(", ")}. Valid values: #{VALID_ONLY_VALUES.join(", ")}. Example: --only branch,labels")
-      end
-      Set(String).new(parts)
+      return parts if invalid.empty?
+
+      raise ArgumentError.new("Unknown --only value(s): #{invalid.join(", ")}. Valid values: #{VALID_ONLY_VALUES.join(", ")}. Example: --only branch,labels")
     end
 
     # Merges two rule maps. *override* wins per branch type and per field.
@@ -193,15 +193,19 @@ module Gitorules
 
       merged = {} of String => BranchRuleConfig
       (base.keys + override.keys).uniq.each do |key|
-        base_rule = base[key]?
-        override_rule = override[key]?
-        if base_rule && override_rule
-          merged[key] = merge_branch(base_rule, override_rule)
-        elsif rule = override_rule || base_rule
+        if rule = merge_entry(base[key]?, override[key]?)
           merged[key] = rule
         end
       end
       merged
+    end
+
+    # One merged rule: field-wise when both sides define it, otherwise
+    # whichever side does.
+    private def self.merge_entry(base_rule : BranchRuleConfig?, override_rule : BranchRuleConfig?) : BranchRuleConfig?
+      return base_rule || override_rule unless base_rule && override_rule
+
+      merge_branch(base_rule, override_rule)
     end
 
     # Merges two branch configs. Non-nil *override* fields win.
@@ -211,15 +215,10 @@ module Gitorules
     # of inherited, keeping at most one method set to `"only"`.
     def self.merge_branch(base : BranchRuleConfig, override : BranchRuleConfig) : BranchRuleConfig
       merged = BranchRuleConfig.new
-      if override.merge || override.squash || override.rebase
-        merged.merge = override.merge
-        merged.squash = override.squash
-        merged.rebase = override.rebase
-      else
-        merged.merge = base.merge
-        merged.squash = base.squash
-        merged.rebase = base.rebase
-      end
+      source = override.merge || override.squash || override.rebase ? override : base
+      merged.merge = source.merge
+      merged.squash = source.squash
+      merged.rebase = source.rebase
       merged.name = override.name.nil? ? base.name : override.name
       merged.pattern = override.pattern.nil? ? base.pattern : override.pattern
       merged.checks = override.checks.nil? ? base.checks : override.checks
@@ -234,32 +233,35 @@ module Gitorules
 
     private def self.glob_to_regex(pattern : String) : Regex
       io = IO::Memory.new
-      io << "\\A"
-      i = 0
-      while i < pattern.size
-        char = pattern[i]
-        case char
-        when '*'
-          io << ".*"
-        when '?'
-          io << "."
-        when '['
-          closing = pattern.index(']', i)
-          if closing
-            io << pattern[i..closing]
-            i = closing
-          else
-            io << "\\["
-          end
-        when '.', '+', '(', ')', '|', '^', '$', '{', '}', '\\'
-          io << "\\" << char
-        else
-          io << char
-        end
-        i += 1
-      end
-      io << "\\z"
+      io << "\\A" << glob_body(pattern) << "\\z"
       Regex.new(io.to_s)
+    end
+
+    # Translates glob syntax to a regex body. `*` spans `/` and `?` is one
+    # character; an unclosed `[` is treated literally.
+    private def self.glob_body(pattern : String) : String
+      String.build do |io|
+        i = 0
+        while i < pattern.size
+          char = pattern[i]
+          closing = char == '[' ? pattern.index(']', i) : nil
+          io << (closing ? pattern[i..closing] : glob_char(char))
+          i = closing ? closing + 1 : i + 1
+        end
+      end
+    end
+
+    # Regex text for a single glob character.
+    private def self.glob_char(char : Char) : String
+      case char
+      when '*' then ".*"
+      when '?' then "."
+      when '[' then "\\["
+      when '.', '+', '(', ')', '|', '^', '$', '{', '}', '\\'
+        "\\#{char}"
+      else
+        char.to_s
+      end
     end
   end
 end

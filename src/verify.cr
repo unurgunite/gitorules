@@ -29,24 +29,30 @@ module Gitorules
     ) : Array(String)
       doc = YAML.parse(content)
       workflow_name = workflow_name(doc, workflow_key, template_path, warnings)
+      jobs = lint_jobs(doc, template_path, warnings)
+      jobs.nil? ? [] of String : expand_jobs(workflow_name, jobs, template_path, warnings)
+    rescue ex : YAML::ParseException
+      warnings << "in #{template_path}: the template is not valid YAML (#{ex.message}). Fix: check indentation and quoting, then retry."
+      [] of String
+    end
+
+    # The `jobs:` mapping, or nil (with a warning) when absent or empty.
+    private def self.lint_jobs(doc : YAML::Any, template_path : String, warnings : Array(String)) : Hash(YAML::Any, YAML::Any)?
       jobs = fetch_hash(doc, "jobs")
-      unless jobs
-        warnings << "in #{template_path}: no `jobs:` mapping found, nothing is produced. Fix: add at least one job to the template."
-        return [] of String
-      end
-      if jobs.empty?
-        warnings << "in #{template_path}: no `jobs:` mapping found, nothing is produced. Fix: add at least one job to the template."
-        return [] of String
-      end
+      return jobs if jobs && !jobs.empty?
+
+      warnings << "in #{template_path}: no `jobs:` mapping found, nothing is produced. Fix: add at least one job to the template."
+      nil
+    end
+
+    # One check name set per job, de-duplicated.
+    private def self.expand_jobs(workflow_name : String, jobs : Hash(YAML::Any, YAML::Any), template_path : String, warnings : Array(String)) : Array(String)
       result = [] of String
       jobs.each do |job_key, job_value|
         job_id = job_key.as_s? || next
         result.concat(expand_job(workflow_name, job_id, job_value, template_path, warnings))
       end
       result.uniq!
-    rescue ex : YAML::ParseException
-      warnings << "in #{template_path}: the template is not valid YAML (#{ex.message}). Fix: check indentation and quoting, then retry."
-      [] of String
     end
 
     # Resolves the workflow display name.
@@ -73,24 +79,32 @@ module Gitorules
     private def self.expand_matrix(workflow_name : String, job_id : String, base : String, matrix : YAML::Any, template_path : String, warnings : Array(String)) : Array(String)
       matrix_hash = matrix.as_h?
       unless matrix_hash
-        warnings << "in #{template_path} at jobs.#{job_id}.strategy.matrix: unknown matrix shape, using plain job name #{base.inspect}. Fix: use `matrix: {key: [values]}` or `include: [...]` shapes."
+        matrix_shape_warning(warnings, template_path, job_id, base)
         return [base]
       end
       parsed = parse_matrix(matrix_hash, job_id, base, template_path, warnings)
       return [base] unless parsed
       axes, includes, excludes = parsed
+
       result = [] of String
       unless axes.empty?
-        combos = cartesian(axes)
-        combos = apply_excludes(combos, axes, excludes)
-        combos.each do |combo|
-          result << (combo.empty? ? base : "#{base} (#{combo.join(", ")})")
-        end
+        combos = apply_excludes(cartesian(axes), axes, excludes)
+        combos.each { |combo| result << matrix_label(base, combo) }
       end
-      includes.each do |values|
-        result << "#{base} (#{values.join(", ")})"
-      end
+      includes.each { |values| result << matrix_label(base, values) }
       result.uniq!
+    end
+
+    # Check-name suffix for one matrix combination.
+    private def self.matrix_label(base : String, combo : Array(String)) : String
+      combo.empty? ? base : "#{base} (#{combo.join(", ")})"
+    end
+
+    # Records the shared "unknown matrix shape" warning. A nil *key* means
+    # the whole matrix node was unusable.
+    private def self.matrix_shape_warning(warnings : Array(String), template_path : String, job_id : String, base : String, key : String? = nil) : Nil
+      location = key ? "jobs.#{job_id}.strategy.matrix.#{key}" : "jobs.#{job_id}.strategy.matrix"
+      warnings << "in #{template_path} at #{location}: unknown matrix shape, using plain job name #{base.inspect}. Fix: use `matrix: {key: [values]}` or `include: [...]` shapes."
     end
 
     # Parses matrix axes, include and exclude lists.
@@ -103,77 +117,71 @@ module Gitorules
       excludes = [] of Hash(String, String)
       matrix_hash.each do |key_any, value_any|
         key = key_any.as_s? || next
-        case key
-        when "include"
-          parsed = parse_include(value_any, job_id, base, template_path, warnings)
-          return unless parsed
-          includes.concat(parsed)
-        when "exclude"
-          parsed = parse_exclude(value_any, job_id, base, template_path, warnings)
-          return unless parsed
-          excludes.concat(parsed)
-        else
-          values = value_any.as_a?
-          unless values
-            warnings << "in #{template_path} at jobs.#{job_id}.strategy.matrix.#{key}: unknown matrix shape, using plain job name #{base.inspect}. Fix: use `matrix: {key: [values]}` or `include: [...]` shapes."
-            return
-          end
-          axes << {key, values.map { |entry| Gitorules.yaml_scalar_to_s(entry) }}
-        end
+        next if collect_matrix_axis(key, value_any, axes, job_id, base, template_path, warnings)
+        return if collect_matrix_extra(key, value_any, includes, excludes, job_id, base, template_path, warnings) == :invalid
       end
-      if axes.empty? && includes.empty?
-        warnings << "in #{template_path} at jobs.#{job_id}.strategy.matrix: unknown matrix shape, using plain job name #{base.inspect}. Fix: use `matrix: {key: [values]}` or `include: [...]` shapes."
-        return
-      end
+      return if axes.empty? && includes.empty?
+
       {axes, includes, excludes}
     end
 
-    # Parses an `include:` list to value combinations.
-    private def self.parse_include(node : YAML::Any, job_id : String, base : String, template_path : String, warnings : Array(String)) : Array(Array(String))?
-      list = node.as_a?
-      unless list
-        warnings << "in #{template_path} at jobs.#{job_id}.strategy.matrix.include: unknown matrix shape, using plain job name #{base.inspect}. Fix: use `matrix: {key: [values]}` or `include: [...]` shapes."
-        return
-      end
-      result = [] of Array(String)
-      list.each do |entry|
-        entry_hash = entry.as_h?
-        unless entry_hash
-          warnings << "in #{template_path} at jobs.#{job_id}.strategy.matrix.include: unknown matrix shape, using plain job name #{base.inspect}. Fix: use `matrix: {key: [values]}` or `include: [...]` shapes."
-          return
-        end
-        values = [] of String
-        entry_hash.each_value do |value|
-          values << Gitorules.yaml_scalar_to_s(value)
-        end
-        result << values unless values.empty?
-      end
-      result
+    # Appends a plain axis entry. True when *key* was an axis key.
+    private def self.collect_matrix_axis(key : String, value_any : YAML::Any, axes : Array(Tuple(String, Array(String))), job_id : String, base : String, template_path : String, warnings : Array(String)) : Bool
+      return false if key.in?("include", "exclude")
+
+      axis = parse_axis(key, value_any, job_id, base, template_path, warnings)
+      axes << axis if axis
+      true
     end
 
-    # Parses an `exclude:` list to key-value maps.
-    private def self.parse_exclude(node : YAML::Any, job_id : String, base : String, template_path : String, warnings : Array(String)) : Array(Hash(String, String))?
+    # Appends an `include:`/`exclude:` entry list. Returns :invalid when the
+    # list shape is unusable (warning already recorded).
+    private def self.collect_matrix_extra(key : String, value_any : YAML::Any, includes : Array(Array(String)), excludes : Array(Hash(String, String)), job_id : String, base : String, template_path : String, warnings : Array(String)) : Symbol
+      list = matrix_entry_list(value_any, job_id, base, template_path, warnings, key)
+      return :invalid unless list
+
+      if key == "include"
+        list.each { |entry| includes << matrix_include_values(entry) unless entry.empty? }
+      else
+        list.each { |entry| excludes << matrix_exclude_values(entry) unless entry.empty? }
+      end
+      :ok
+    end
+
+    # One matrix axis; nil (with the warning recorded) for a non-list value.
+    private def self.parse_axis(key : String, value_any : YAML::Any, job_id : String, base : String, template_path : String, warnings : Array(String)) : Tuple(String, Array(String))?
+      values = value_any.as_a?
+      return {key, values.map { |entry| Gitorules.yaml_scalar_to_s(entry) }} if values
+
+      matrix_shape_warning(warnings, template_path, job_id, base, key)
+      nil
+    end
+
+    # Validates a matrix `include:`/`exclude:` list, returning its entry
+    # mappings or nil (with the warning recorded) for a bad shape.
+    private def self.matrix_entry_list(node : YAML::Any, job_id : String, base : String, template_path : String, warnings : Array(String), key : String) : Array(Hash(YAML::Any, YAML::Any))?
       list = node.as_a?
-      unless list
-        warnings << "in #{template_path} at jobs.#{job_id}.strategy.matrix.exclude: unknown matrix shape, using plain job name #{base.inspect}. Fix: use `matrix: {key: [values]}` or `include: [...]` shapes."
-        return
+      return unless list
+      hashes = list.compact_map(&.as_h?)
+      return hashes if hashes.size == list.size
+
+      matrix_shape_warning(warnings, template_path, job_id, base, key)
+      nil
+    end
+
+    # Values of one `include:` entry, in declaration order.
+    private def self.matrix_include_values(entry : Hash(YAML::Any, YAML::Any)) : Array(String)
+      entry.values.map { |value| Gitorules.yaml_scalar_to_s(value) }
+    end
+
+    # Key-value map of one `exclude:` entry.
+    private def self.matrix_exclude_values(entry : Hash(YAML::Any, YAML::Any)) : Hash(String, String)
+      mapping = {} of String => String
+      entry.each do |key_any, value_any|
+        key = key_any.as_s?
+        mapping[key] = Gitorules.yaml_scalar_to_s(value_any) if key
       end
-      result = [] of Hash(String, String)
-      list.each do |entry|
-        entry_hash = entry.as_h?
-        unless entry_hash
-          warnings << "in #{template_path} at jobs.#{job_id}.strategy.matrix.exclude: unknown matrix shape, using plain job name #{base.inspect}. Fix: use `matrix: {key: [values]}` or `include: [...]` shapes."
-          return
-        end
-        mapping = {} of String => String
-        entry_hash.each do |key_any, value_any|
-          if key = key_any.as_s?
-            mapping[key] = Gitorules.yaml_scalar_to_s(value_any)
-          end
-        end
-        result << mapping unless mapping.empty?
-      end
-      result
+      mapping
     end
 
     # Computes the cartesian product of matrix axes.
@@ -298,20 +306,14 @@ module Gitorules
       produced_names = produced.uniq!.sort!
       missing = required_names - produced_names
       extra = produced_names - required_names
+      report_missing(missing, required, produced_names, scope_name, config_path, errors)
+      report_extra(extra, scope_name, config, config_path, warnings)
 
-      locations = {} of String => String
-      required.each { |entry| locations[entry[:check]] ||= entry[:location] }
+      {build_report(scope_name, required_names, produced_names, missing, extra, produce_warnings), errors, warnings}
+    end
 
-      missing.each do |check|
-        location = locations[check]? || "scopes.#{scope_name}.rules.*.checks"
-        errors << "in #{config_path} at #{location}: required check #{check.inspect} is not produced by any workflow in scope #{scope_name.inspect}. Fix: rename the check or update the template. Produced checks in scope #{scope_name.inspect}: #{format_list(produced_names)}"
-      end
-
-      extra.each do |check|
-        warnings << "in #{config_path} at #{scope_workflows_location(config, scope_name)}: produced check #{check.inspect} has no matching requirement in scope #{scope_name.inspect}. Fix: add it to #{scope_rules_prefix(config, scope_name)}.*.checks if it should be required, or ignore this warning."
-      end
-
-      report = ScopeReport.new(
+    private def self.build_report(scope_name : String, required_names : Array(String), produced_names : Array(String), missing : Array(String), extra : Array(String), produce_warnings : Array(String)) : ScopeReport
+      ScopeReport.new(
         scope: scope_name,
         required: required_names,
         produced: produced_names,
@@ -319,7 +321,25 @@ module Gitorules
         extra: extra.sort,
         warnings: produce_warnings.dup
       )
-      {report, errors, warnings}
+    end
+
+    # Records one error per required check that no workflow produces,
+    # pointing at the rule that requires it when known.
+    private def self.report_missing(missing : Array(String), required : Array(NamedTuple(check: String, location: String)), produced_names : Array(String), scope_name : String, config_path : String, errors : Array(String)) : Nil
+      locations = {} of String => String
+      required.each { |entry| locations[entry[:check]] ||= entry[:location] }
+
+      missing.each do |check|
+        location = locations[check]? || "scopes.#{scope_name}.rules.*.checks"
+        errors << "in #{config_path} at #{location}: required check #{check.inspect} is not produced by any workflow in scope #{scope_name.inspect}. Fix: rename the check or update the template. Produced checks in scope #{scope_name.inspect}: #{format_list(produced_names)}"
+      end
+    end
+
+    # Records one warning per produced check that no rule requires.
+    private def self.report_extra(extra : Array(String), scope_name : String, config : Config, config_path : String, warnings : Array(String)) : Nil
+      extra.each do |check|
+        warnings << "in #{config_path} at #{scope_workflows_location(config, scope_name)}: produced check #{check.inspect} has no matching requirement in scope #{scope_name.inspect}. Fix: add it to #{scope_rules_prefix(config, scope_name)}.*.checks if it should be required, or ignore this warning."
+      end
     end
 
     # Collects exact required checks for a scope with locations.
@@ -395,31 +415,31 @@ module Gitorules
       produced = [] of String
       warnings = [] of String
       workflows.each do |key, entry|
-        source = entry.source
-        if source.nil? || source.strip.empty?
-          errors << "in #{config_path} at #{scope_workflows_location(nil, scope_name)}.#{key}: workflow #{key.inspect} has no source configured. Fix: add `source: templates/#{key}` or remove the entry."
-          next
-        end
-        if remote_source?(source)
-          # Remote sources resolve over the API, not the local disk.
-          # Offline consistency checks cannot fetch them; syntax is
-          # already validated by `lint_workflows`, so skip silently.
-          next
-        end
-        template_path = resolve_source(source, base_dir)
-        unless File.exists?(template_path)
-          errors << "in #{config_path} at #{scope_workflows_location(nil, scope_name)}.#{key}: template source #{source.inspect} not found (looked at #{template_path.inspect}). Fix: create the template or fix the `source:` path."
-          next
-        end
-        begin
-          content = File.read(template_path)
-        rescue ex
-          errors << "in #{config_path} at #{scope_workflows_location(nil, scope_name)}.#{key}: cannot read template #{source.inspect} (#{ex.message}). Fix: check the path and file permissions."
-          next
-        end
-        produced.concat(WorkflowChecks.produced_checks(content, key, template_path, warnings))
+        template_path = read_template(entry.source, key, base_dir, config_path, scope_name, errors) || next
+        produced.concat(WorkflowChecks.produced_checks(File.read(template_path), key, template_path, warnings))
       end
       {produced, warnings}
+    end
+
+    # Resolves and reads a local template, returning its path or nil after
+    # recording why it cannot be read.
+    private def self.read_template(source : String?, key : String, base_dir : String, config_path : String, scope_name : String, errors : Array(String)) : String?
+      location = scope_workflows_location(nil, scope_name)
+      if source.nil? || source.strip.empty?
+        errors << "in #{config_path} at #{location}.#{key}: workflow #{key.inspect} has no source configured. Fix: add `source: templates/#{key}` or remove the entry."
+        return
+      end
+      # Remote sources resolve over the API, not the local disk. Offline
+      # consistency checks cannot fetch them; syntax is already validated
+      # by `lint_workflows`, so skip silently.
+      return if remote_source?(source)
+
+      template_path = resolve_source(source, base_dir)
+      unless File.exists?(template_path)
+        errors << "in #{config_path} at #{location}.#{key}: template source #{source.inspect} not found (looked at #{template_path.inspect}). Fix: create the template or fix the `source:` path."
+        return
+      end
+      template_path
     end
 
     # Resolves a template source against *base_dir*.
@@ -510,6 +530,20 @@ module Gitorules
       verify_content(content, path, base_dir, scope_filter, json, io, err)
     end
 
+    # Scope names to verify: all of them, or just the requested one.
+    # Returns nil (after printing the error) when the filter is unknown.
+    private def self.filtered_scope_names(names : Array(String), scope_filter : String?, err : IO) : Array(String)?
+      filter = scope_filter
+      if filter.nil?
+        names
+      elsif names.includes?(filter)
+        [filter]
+      else
+        err.puts "Error: unknown scope '#{filter}'. Available scopes: #{names.join(", ")}. Check the `scopes:` section in your config file or run without --scope to use all scopes."
+        nil
+      end
+    end
+
     # Verifies YAML *content* and prints the report.
     def self.verify_content(content : String, path : String = ".gitorules.yml", base_dir : String = Dir.current, scope_filter : String? = nil, json : Bool = false, io : IO = STDOUT, err : IO = STDERR) : Int32
       config = Config.from_yaml(content)
@@ -517,43 +551,45 @@ module Gitorules
       err.puts "Error in #{path}: cannot parse config (#{ex.message}). Fix: check indentation and quoting, then retry."
       2
     else
-      names = Consistency.scope_names(config)
-      if filter = scope_filter
-        unless names.includes?(filter)
-          err.puts "Error: unknown scope '#{filter}'. Available scopes: #{names.join(", ")}. Check the `scopes:` section in your config file or run without --scope to use all scopes."
-          return 2
-        end
-        names = [filter]
-      end
+      names = filtered_scope_names(Consistency.scope_names(config), scope_filter, err)
+      return 2 unless names
+
+      reports, errors, warnings = collect_reports(config, names, base_dir, path)
+      warnings.each { |line| err.puts "Warning: #{line}" }
+      json ? print_json(reports, io) : print_text(reports, io)
+      report_result(reports, errors, json, io, err)
+    end
+
+    # Runs the consistency check for every scope, keeping the results whose
+    # scope has workflows.
+    private def self.collect_reports(config : Config, names : Array(String), base_dir : String, path : String) : {Array(ScopeReport), Array(String), Array(String)}
       reports = [] of ScopeReport
       errors = [] of String
       warnings = [] of String
       names.each do |scope_name|
         report, scope_errors, scope_warnings = Consistency.check_scope(config, scope_name, base_dir, path)
-        next if report.nil?
-        if scoped = report
-          reports << scoped
-          errors.concat(scope_errors)
-          warnings.concat(scope_warnings)
-        end
+        next unless report
+
+        reports << report
+        errors.concat(scope_errors)
+        warnings.concat(scope_warnings)
       end
-      warnings.each { |line| err.puts "Warning: #{line}" }
-      if json
-        print_json(reports, io)
-      else
-        print_text(reports, io)
-      end
+      {reports, errors, warnings}
+    end
+
+    # Prints the closing line or the errors, and returns the exit code.
+    private def self.report_result(reports : Array(ScopeReport), errors : Array(String), json : Bool, io : IO, err : IO) : Int32
       if reports.empty?
         io.puts "No scopes with workflows found, nothing to verify"
         return 0
       end
       if errors.empty?
         io.puts "OK: all required checks are produced" unless json
-        0
-      else
-        errors.each { |line| err.puts "Error: #{line}" } unless json
-        2
+        return 0
       end
+
+      errors.each { |line| err.puts "Error: #{line}" } unless json
+      2
     end
 
     # Prints a human-readable per-scope report.
@@ -565,14 +601,14 @@ module Gitorules
         if report.missing.empty? && report.extra.empty?
           io.puts "  OK: all required checks are produced"
         else
-          unless report.missing.empty?
-            io.puts "  Missing (#{report.missing.size}): #{format_checks(report.missing)}"
-          end
-          unless report.extra.empty?
-            io.puts "  Extra (#{report.extra.size}): #{format_checks(report.extra)}"
-          end
+          print_list("Missing", report.missing, io) unless report.missing.empty?
+          print_list("Extra", report.extra, io) unless report.extra.empty?
         end
       end
+    end
+
+    private def self.print_list(label : String, checks : Array(String), io : IO) : Nil
+      io.puts "  #{label} (#{checks.size}): #{format_checks(checks)}"
     end
 
     # Prints a machine-readable JSON report.

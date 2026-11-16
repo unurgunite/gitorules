@@ -6,3 +6,16 @@ Naming/BlockParameterName:
 Style/MultilineStringLiteral:
   Excluded:
     - spec/**/*.cr
+
+# Metrics/MethodLength (ameba-method_length) is registered through
+# bin/ameba.cr, so it only lints when the binary is built from that file.
+# MaxLines matches the sibling shards (catalyst, ameba-method_length) so the
+# same body passes lint in every repo. Multi-line literals fold to their first
+# line: a method holding config or output literals is not punished for them.
+Metrics/MethodLength:
+  Enabled: true
+  MaxLines: 15
+  CountAsOne:
+    - array
+    - hash
+    - heredoc

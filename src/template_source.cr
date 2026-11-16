@@ -170,26 +170,35 @@ module Gitorules
     # Fetches a remote template via the Contents API with caching.
     private def resolve_remote(source : TemplateSource) : ResolvedTemplate
       key = source.raw
-      if hit = memory_get(key)
-        return hit
-      end
-      if hit = disk_get(key)
-        memory_put(key, hit)
-        return hit
-      end
+      hit = cached(key)
+      return hit if hit
 
-      repo = source.repo || ""
-      template_path = source.path || ""
-      ref = source.ref || ""
-      fetched = @client.get_contents_at_ref(repo, template_path, ref)
-      unless fetched
-        raise "Workflow source not found: #{key} (template '#{template_path}' not found at ref '#{ref}' in '#{repo}')"
-      end
-
+      fetched = fetch_source(source, key)
       resolved = ResolvedTemplate.new(fetched[:content], fetched[:sha], source)
       memory_put(key, resolved)
       disk_put(key, resolved)
       resolved
+    end
+
+    # Memory-then-disk cache lookup; a disk hit is promoted to memory.
+    private def cached(key : String) : ResolvedTemplate?
+      if hit = memory_get(key)
+        return hit
+      end
+
+      hit = disk_get(key)
+      memory_put(key, hit) if hit
+      hit
+    end
+
+    private def fetch_source(source : TemplateSource, key : String) : NamedTuple(content: String, sha: String)
+      repo = source.repo || ""
+      template_path = source.path || ""
+      ref = source.ref || ""
+      fetched = @client.get_contents_at_ref(repo, template_path, ref)
+      return fetched if fetched
+
+      raise "Workflow source not found: #{key} (template '#{template_path}' not found at ref '#{ref}' in '#{repo}')"
     end
 
     private def memory_get(key : String) : ResolvedTemplate?
