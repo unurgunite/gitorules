@@ -568,7 +568,7 @@ module Gitorules
     # Migrates the file at *path*.
     #
     # Returns 0 on success, 2 on read, parse, or schema errors.
-    def self.migrate_file(path : String, in_place : Bool = false, io : IO = STDOUT, err : IO = STDERR) : Int32
+    def self.migrate_file(path : String, in_place : Bool = false, io : IO = STDOUT, err : IO = STDERR, dry_run : Bool = false) : Int32
       content = File.read(path)
     rescue File::NotFoundError
       err.puts "Error in #{path}: file not found. Fix: create the file or pass --config PATH to an existing config."
@@ -580,13 +580,19 @@ module Gitorules
       migrated = migrate_or_report(content, path, err)
       return 2 unless migrated
 
-      write_migrated(path, migrated, in_place, io, err)
+      write_migrated(path, migrated, in_place, io, err, dry_run)
     end
 
     # Writes in place with a confirmation, or streams to STDOUT.
-    private def self.write_migrated(path : String, migrated : String, in_place : Bool, io : IO, err : IO) : Int32
+    # *dry_run* skips the file write but still prints the migrated config.
+    private def self.write_migrated(path : String, migrated : String, in_place : Bool, io : IO, err : IO, dry_run : Bool = false) : Int32
       unless in_place
         io.puts migrated
+        return 0
+      end
+
+      if dry_run
+        err.puts "Dry run: #{path} would be migrated to defaults/scopes shape (not written)."
         return 0
       end
 
